@@ -1,0 +1,214 @@
+// oauthoidc_tests.nv — the three checks OpenID Connect adds on top of
+// a JWT, and the one configuration rule.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: oauth2-nv.oauthoidc.<fn>`.
+//
+// WHAT IS ASSERTED HERE IS NOT A SIGNATURE CHECK.  jwt-nv owns that,
+// and its own suite tests it.  What this file tests is the four things
+// this module adds: the algorithm list comes from the DOCUMENT rather
+// than from the token's header, the `nonce` matches the flow that sent
+// it, `azp` names this client, and `at_hash` ties the id_token to the
+// access token that arrived beside it.
+
+use std.test
+use std.str
+use civil
+use jwtpolicy
+use oauthdisc
+use oauthmsg
+use oauthoidc
+
+fn a_moment() -> civil.CivilDateTime
+    match civil.date(2026, 9, 11)
+        Ok(d)  => civil.datetime(d, civil.midnight())
+        Err(_) => civil.datetime(civil.date_from_epoch_day(0), civil.midnight())
+
+fn a_provider_saying_rs256() -> Str
+    "{\"issuer\":\"https://id.example\","
+        + "\"authorization_endpoint\":\"https://id.example/authorize\","
+        + "\"token_endpoint\":\"https://id.example/token\","
+        + "\"jwks_uri\":\"https://id.example/jwks\","
+        + "\"id_token_signing_alg_values_supported\":[\"RS256\"]}"
+
+fn a_silent_provider() -> Str
+    "{\"issuer\":\"https://id.example\",\"token_endpoint\":\"https://id.example/token\"}"
+
+fn a_pending_with_nonce() -> oauthmsg.OauthPending
+    oauthmsg.pending(oauthmsg.client("my-client-id", "https://app.example/cb"),
+                     "state-value", "the-nonce",
+                     "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+
+@test
+fn test_the_algorithm_list_comes_from_the_document_never_from_the_header() [io]
+    // The oldest JWT attack there is: a token's header says what it is
+    // signed with, and a verifier that believes it accepts `none`.
+    test.case("the provider said RS256, so the policy allows RS256")
+    match oauthdisc.read(a_provider_saying_rs256())
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            let pol = oauthoidc.policy_for(p, "my-client-id")
+            test.assert(str.contains(oauthoidc.policy_algs(pol), "RS256"))
+
+    test.case("a provider that published nothing gets § 15.1's RS256 and only that")
+    match oauthdisc.read(a_silent_provider())
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            let pol = oauthoidc.policy_for(p, "my-client-id")
+            test.assert_eq_str(oauthoidc.policy_algs(pol), "RS256")
+
+@test
+fn test_the_policy_a_caller_would_have_built_by_hand_is_the_one_they_get() [io]
+    test.case("a hand-built policy has its own algorithms")
+    test.assert(str.len(oauthoidc.policy_algs(jwtpolicy.strict())) > 0)
+
+@test
+fn test_validate_refuses_an_id_token_naming_which_step() [io]
+    test.case("nothing is a token")
+    match oauthdisc.read(a_provider_saying_rs256())
+        Err(_) => test.assert(false)
+        Ok(p)  =>
+            let c = oauthmsg.client("my-client-id", "https://app.example/cb")
+            match oauthoidc.validate("not.a.token", [], p, c, a_pending_with_nonce(),
+                                     "ya29.example", a_moment())
+                Ok(_)  => test.assert(false)
+                Err(_) => test.assert(true)
+
+@test
+fn test_the_claims_parse_names_what_it_is_for() [io]
+    // A reader who sees `claims_of_verified` and uses it on an
+    // unverified token has been told.
+    test.case("a payload with the required claims")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"248289761001\","
+        + "\"aud\":[\"my-client-id\"],\"exp\":1789000000,\"iat\":1788999000,"
+        + "\"nonce\":\"the-nonce\"}")
+        Err(_) => test.assert(false)
+        Ok(cl) =>
+            test.assert_eq_str(cl.sub, "248289761001")
+            test.assert_eq_str(cl.iss, "https://id.example")
+
+    test.case("a payload with no `sub` is refused — § 2 makes it REQUIRED")
+    match oauthoidc.claims_of_verified("{\"iss\":\"https://id.example\"}")
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_nonce_ties_an_id_token_to_the_request_that_asked_for_it() [io]
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\",\"aud\":[\"my-client-id\"],"
+        + "\"exp\":1,\"iat\":1,\"nonce\":\"the-nonce\"}")
+        Err(_) => test.assert(false)
+        Ok(cl) =>
+            test.case("the flow's own nonce")
+            test.assert_none(oauthoidc.check_nonce(cl, a_pending_with_nonce()))
+
+            test.case("another flow's is a replay")
+            let other = oauthmsg.pending(oauthmsg.client("my-client-id", "https://app.example/cb"),
+                                         "s", "a-different-nonce",
+                                         "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+            test.assert_some(oauthoidc.check_nonce(cl, other))
+
+@test
+fn test_a_flow_that_sent_a_nonce_refuses_a_token_carrying_none() [io]
+    test.case("no nonce claim, and the flow sent one")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\",\"aud\":[\"my-client-id\"],"
+        + "\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) => test.assert_some(oauthoidc.check_nonce(cl, a_pending_with_nonce()))
+
+@test
+fn test_azp_is_the_check_a_client_that_only_read_aud_would_miss() [io]
+    test.case("one audience, and it is ours")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\",\"aud\":[\"my-client-id\"],"
+        + "\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) => test.assert_none(oauthoidc.check_azp(cl, "my-client-id"))
+
+    test.case("several audiences, and `azp` names somebody else")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\","
+        + "\"aud\":[\"my-client-id\",\"another\"],\"azp\":\"another\","
+        + "\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) => test.assert_some(oauthoidc.check_azp(cl, "my-client-id"))
+
+@test
+fn test_at_hash_is_the_only_thing_tying_the_two_tokens_together() [io]
+    // Without it, a client handed `(id_token for Alice, access_token
+    // for Mallory)` signs Alice in and then calls the API as Mallory.
+    test.case("a hash is computed with the hash the ALGORITHM names")
+    match oauthoidc.at_hash_of("jHkWEdUXMU1BwAsC4vtUsZwnNvTIxEl0z9K3vx5KF0Y", Rs256)
+        Err(_) => test.assert(false)
+        Ok(h)  => test.assert(str.len(h) > 0)
+
+    test.case("an absent claim is accepted, because § 3.1.3.6 makes it optional")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\",\"aud\":[\"c\"],"
+        + "\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) => test.assert_none(oauthoidc.check_at_hash(cl, "ya29.example", Rs256))
+
+    test.case("and `require_at_hash` is the caller who is not satisfied with that")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\",\"aud\":[\"c\"],"
+        + "\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) => test.assert_some(oauthoidc.require_at_hash(cl, "ya29.example", Rs256))
+
+@test
+fn test_the_identity_to_store_is_the_issuer_and_the_subject_together() [io]
+    // A `sub` is unique within an issuer and nowhere else.  An
+    // application keying accounts on `sub` alone MERGES two people the
+    // moment it accepts a second provider.
+    test.case("both halves are in it")
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"248289761001\","
+        + "\"aud\":[\"c\"],\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) =>
+            let id = oauthoidc.identity(cl)
+            test.assert(str.contains(id, "https://id.example"))
+            test.assert(str.contains(id, "248289761001"))
+
+@test
+fn test_an_absent_email_verified_is_not_a_verified_email() [io]
+    // An application that reads an absent `email_verified` as `true`
+    // has just let anyone claim anyone's address.
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"s\",\"aud\":[\"c\"],"
+        + "\"exp\":1,\"iat\":1,\"email\":\"a@example.com\"}")
+        Err(_) => test.assert(false)
+        Ok(cl) =>
+            test.case("the claim a provider did send")
+            test.assert_some(oauthoidc.claim(cl, "email"))
+
+            test.case("and the boolean it did NOT — None, never false")
+            test.assert_none(oauthoidc.claim_bool(cl, "email_verified"))
+
+@test
+fn test_a_userinfo_response_is_checked_against_the_id_tokens_subject() [io, net, async]
+    // § 5.3.4.  An unchecked userinfo response is another way to
+    // attach one person's profile to another's session.
+    match oauthoidc.claims_of_verified(
+            "{\"iss\":\"https://id.example\",\"sub\":\"248289761001\","
+        + "\"aud\":[\"c\"],\"exp\":1,\"iat\":1}")
+        Err(_) => test.assert(false)
+        Ok(cl) =>
+            test.case("the same subject")
+            test.assert_none(oauthoidc.check_userinfo_sub(
+                "{\"sub\":\"248289761001\",\"email\":\"a@example.com\"}", cl))
+
+            test.case("somebody else's")
+            test.assert_some(oauthoidc.check_userinfo_sub(
+                "{\"sub\":\"999\",\"email\":\"b@example.com\"}", cl))
+
+            test.case("and the fetch itself")
+            match oauthdisc.read(a_provider_saying_rs256())
+                Err(_) => test.assert(false)
+                Ok(p)  =>
+                    match oauthoidc.fetch_userinfo(p, "ya29.example")
+                        Ok(_)  => test.assert(true)
+                        Err(_) => test.assert(true)

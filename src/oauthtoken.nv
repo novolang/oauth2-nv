@@ -1,0 +1,374 @@
+// oauthtoken.nv — what a token endpoint answers with, as a value with
+// no clock in it.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THIS MODULE HAS NO CLOCK, and that is the decision the whole package
+// rests on.  RFC 6749 § 5.1 sends `expires_in` — a count of SECONDS,
+// relative to a moment nobody wrote down.  Turning that into an
+// instant needs to know when the response arrived, and asking a clock
+// for it here would make every expiry test a test that sleeps.
+//
+// So `with_expires_in` takes the arrival time as an argument and
+// `is_expired` takes the current time as another.  A caller who has a
+// clock passes `civil` values from it; a test passes two dates it
+// wrote down.  The same shape cookie-nv's jar uses, for the same
+// reason.
+//
+// WHICH DIRECTION THE ARITHMETIC ERRS.  A caller who reads the clock
+// BEFORE the request and passes that reading to `with_expires_in` gets
+// an `expires_at` slightly EARLIER than the server's, by the round
+// trip.  That is the safe direction: the client refreshes a moment
+// early rather than presenting a token a moment after it died.  A
+// library that read the clock itself, after the response, would err
+// the other way.
+//
+// THE RAW JSON IS KEPT.  Every provider adds members RFC 6749 does not
+// define — `id_token` is standardised by OpenID Connect, but `scope`
+// is optional, and GitHub, Slack, Stripe and Google each add three or
+// four of their own.  `extra` reads them out of the document the
+// response arrived as, so a caller is never stuck because this library
+// did not anticipate a field.
+
+use civil
+use oautherr
+
+// How the access token is presented to a resource server.
+pub enum OauthTokenType
+    // RFC 6750: `Authorization: Bearer <token>`.  What almost every
+    // provider issues, and the only one `authorization_header` can
+    // build by itself.
+    OauthBearer
+    // RFC 9449 DPoP.  Presenting one needs a proof JWT signed per
+    // request, which is a key this package does not hold, so
+    // `authorization_header` refuses and says so rather than emitting
+    // a `Bearer` header that a DPoP-protected resource will reject.
+    OauthDpop
+    // The MAC token type from the expired `draft-ietf-oauth-v2-http-mac`
+    // series.  Recognised so a response naming it is not an unknown
+    // type; never built, because the draft was abandoned.
+    OauthMac
+    // Anything else, in the server's own spelling.  Kept verbatim: the
+    // type is compared case-insensitively (RFC 6749 § 7.1) and echoed
+    // exactly.
+    OauthTokenTypeOther(name: Str)
+
+// A token endpoint's successful answer (RFC 6749 § 5.1).
+//
+// `expires_at` is absent where the server sent no `expires_in`, which
+// is allowed and means "this library cannot tell you when it dies".  A
+// caller that treats an absent expiry as "never expires" is the bug
+// this `?` exists to prevent: the right reading is "refresh on the
+// first 401".
+pub struct OauthToken
+    // The credential itself.  Opaque: a client never parses it, even
+    // when it looks like a JWT, because the format is between the
+    // authorization server and the resource server.
+    access_token: Str
+    // `Bearer` for almost everything.
+    token_type: OauthTokenType
+    // When the access token stops working, computed from `expires_in`
+    // and the arrival time the caller supplied.
+    expires_at: ?civil.CivilDateTime
+    // The refresh token, empty where none was issued.  Empty is the
+    // ordinary case for the client-credentials flow, where refreshing
+    // means asking again.
+    refresh_token: Str
+    // The scope actually granted, space-delimited.  Empty where the
+    // server did not say — which means "what you asked for", NOT
+    // "nothing".
+    scope: Str
+    // The OpenID Connect id_token, empty where none was issued.  Held
+    // as the compact serialisation; `oauthoidc.validate` is what turns
+    // it into claims, and nothing here reads it.
+    id_token: Str
+    // The whole response document, as it arrived.  What `extra` reads.
+    raw_json: Str
+
+// A bare bearer token, with no expiry and no refresh.
+//
+// The shape a test starts from, and the shape a caller builds when a
+// token came from somewhere other than a token endpoint — an
+// environment variable, a secrets manager.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     let t = oauthtoken.token("ya29.example")
+//     println(t.access_token)
+// ```
+pub fn token(access_token: Str) -> OauthToken []
+    todo("oauth2-nv.oauthtoken.token")
+
+// A token type from the server's spelling, compared
+// case-insensitively as RFC 6749 § 7.1 requires.
+//
+// `bearer`, `Bearer` and `BEARER` are one type; anything unrecognised
+// becomes `OauthTokenTypeOther` with the spelling kept.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     println(oauthtoken.token_type_name(oauthtoken.token_type_named("bearer")))
+// ```
+pub fn token_type_named(name: Str) -> OauthTokenType []
+    todo("oauth2-nv.oauthtoken.token_type_named")
+
+// The canonical spelling of a token type: `Bearer`, `DPoP`, `mac`, or
+// whatever `OauthTokenTypeOther` carries.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     println(oauthtoken.token_type_name(oauthtoken.OauthBearer))
+// ```
+pub fn token_type_name(t: OauthTokenType) -> Str []
+    todo("oauth2-nv.oauthtoken.token_type_name")
+
+// `expires_in` seconds, counted from the moment the caller says the
+// response arrived.
+//
+// Fails only where the addition leaves the calendar's range, which a
+// server sending an absurd `expires_in` can cause.
+//
+// ```novo
+// use civil
+// use oauthtoken
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let at = civil.datetime(d, civil.midnight())
+//             match oauthtoken.with_expires_in(oauthtoken.token("x"), 3600, at)
+//                 Ok(_)  => println("dated")
+//                 Err(_) => println("out of range")
+// ```
+pub fn with_expires_in(t: OauthToken, seconds: Int,
+                       arrived_at: civil.CivilDateTime) -> Result<OauthToken, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthtoken.with_expires_in")
+
+// An explicit expiry, for a caller who computed it elsewhere.
+//
+// ```novo
+// use civil
+// use oauthtoken
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let at = civil.datetime(d, civil.midnight())
+//             let t = oauthtoken.with_expires_at(oauthtoken.token("x"), at)
+//             println("${oauthtoken.has_expiry(t)}")
+// ```
+pub fn with_expires_at(t: OauthToken, at: civil.CivilDateTime) -> OauthToken []
+    todo("oauth2-nv.oauthtoken.with_expires_at")
+
+// The refresh token this token was issued with.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     let t = oauthtoken.with_refresh(oauthtoken.token("a"), "r")
+//     println(t.refresh_token)
+// ```
+pub fn with_refresh(t: OauthToken, refresh_token: Str) -> OauthToken []
+    todo("oauth2-nv.oauthtoken.with_refresh")
+
+// Whether the server said when this token dies.
+//
+// The question to ask before trusting `is_expired`, which answers
+// `false` for a token with no expiry — correctly, because an absent
+// `expires_in` is not a claim that the token is dead.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     println("${oauthtoken.has_expiry(oauthtoken.token("x"))}")
+// ```
+pub fn has_expiry(t: OauthToken) -> Bool []
+    todo("oauth2-nv.oauthtoken.has_expiry")
+
+// Whether the token is dead at `now`, treating anything within
+// `leeway_secs` of the expiry as dead.
+//
+// `false` for a token with no expiry: the server did not say, and this
+// library will not guess.  Check `has_expiry` where the difference
+// matters.
+//
+// The leeway is the client's own margin for clock skew and for the
+// round trip to the resource server — thirty seconds is the
+// conventional value, and zero is the right one in a test.
+//
+// ```novo
+// use civil
+// use oauthtoken
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             println("${oauthtoken.is_expired(oauthtoken.token("x"), now, 30)}")
+// ```
+pub fn is_expired(t: OauthToken, now: civil.CivilDateTime, leeway_secs: Int) -> Bool []
+    todo("oauth2-nv.oauthtoken.is_expired")
+
+// Whether a caller holding this token should refresh before using it.
+//
+// `is_expired` with the leeway, and `false` where there is no refresh
+// token — because refreshing without one is not a thing that can be
+// done, and a caller looping on `needs_refresh` would loop forever.
+//
+// ```novo
+// use civil
+// use oauthtoken
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             println("${oauthtoken.needs_refresh(oauthtoken.token("x"), now, 30)}")
+// ```
+pub fn needs_refresh(t: OauthToken, now: civil.CivilDateTime, leeway_secs: Int) -> Bool []
+    todo("oauth2-nv.oauthtoken.needs_refresh")
+
+// Seconds until the expiry, negative once past it, `None` where the
+// server sent no expiry.
+//
+// ```novo
+// use civil
+// use oauthtoken
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             match oauthtoken.seconds_left(oauthtoken.token("x"), now)
+//                 Some(n) => println("${n}")
+//                 None    => println("the server did not say")
+// ```
+pub fn seconds_left(t: OauthToken, now: civil.CivilDateTime) -> ?Int []
+    todo("oauth2-nv.oauthtoken.seconds_left")
+
+// The `Authorization` header value this token is presented with.
+//
+// Refuses a DPoP token by name: presenting one needs a proof JWT
+// signed with a key this package does not hold, and emitting a
+// `Bearer` header for it produces a 401 whose cause is invisible.  A
+// token type this library does not know is refused for the same
+// reason — a guess here is a credential sent in a form the resource
+// server does not accept.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     match oauthtoken.authorization_header(oauthtoken.token("ya29.example"))
+//         Ok(h)  => println(h)
+//         Err(_) => println("this token type needs more than a header")
+// ```
+pub fn authorization_header(t: OauthToken) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthtoken.authorization_header")
+
+// The granted scopes, split on spaces.
+//
+// Empty where the server said nothing, which means "what you asked
+// for" rather than "nothing" — so a caller comparing this list
+// against what it requested must check for the empty case first.
+// `covers` does that.
+//
+// ```novo
+// use std.list
+// use oauthtoken
+//
+// fn main() [io]
+//     println("${list.len(oauthtoken.granted_scopes(oauthtoken.token("x")))}")
+// ```
+pub fn granted_scopes(t: OauthToken) -> [Str] []
+    todo("oauth2-nv.oauthtoken.granted_scopes")
+
+// Whether a named scope was granted.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     println("${oauthtoken.has_scope(oauthtoken.token("x"), "repo")}")
+// ```
+pub fn has_scope(t: OauthToken, scope: Str) -> Bool []
+    todo("oauth2-nv.oauthtoken.has_scope")
+
+// Whether every scope the caller asked for was granted, given what it
+// asked for.
+//
+// The `requested` argument is what makes this answerable: a response
+// with no `scope` member granted everything requested, and a response
+// with one granted exactly what it lists.  A function with only the
+// token to look at cannot tell those apart.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     println("${oauthtoken.covers(oauthtoken.token("x"), ["repo"])}")
+// ```
+pub fn covers(t: OauthToken, requested: [Str]) -> Bool []
+    todo("oauth2-nv.oauthtoken.covers")
+
+// A member of the response document this library does not model.
+//
+// Every provider adds some — `refresh_token_expires_in`,
+// `resource_owner_id`, `team`, `bot_user_id` — and a client that needs
+// one is otherwise stuck until this package adds a field.  Reads out
+// of `raw_json`, so it answers whatever arrived; `None` where the
+// member is absent or is not a string.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     match oauthtoken.extra(oauthtoken.token("x"), "resource_owner_id")
+//         Some(v) => println(v)
+//         None    => println("absent")
+// ```
+pub fn extra(t: OauthToken, member: Str) -> ?Str []
+    todo("oauth2-nv.oauthtoken.extra")
+
+// A numeric member of the response document, for the `*_expires_in`
+// fields providers invent.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     match oauthtoken.extra_int(oauthtoken.token("x"), "refresh_token_expires_in")
+//         Some(n) => println("${n}")
+//         None    => println("absent")
+// ```
+pub fn extra_int(t: OauthToken, member: Str) -> ?Int []
+    todo("oauth2-nv.oauthtoken.extra_int")
+
+// A token with its secrets replaced by their lengths, for a log.
+//
+// The access token, the refresh token and the id_token become
+// `<32 bytes>`; everything else is unchanged.  Published because the
+// alternative is every caller writing its own, and the one that
+// forgets logs a credential.
+//
+// ```novo
+// use oauthtoken
+//
+// fn main() [io]
+//     println(oauthtoken.redacted(oauthtoken.token("ya29.example")))
+// ```
+pub fn redacted(t: OauthToken) -> Str []
+    todo("oauth2-nv.oauthtoken.redacted")

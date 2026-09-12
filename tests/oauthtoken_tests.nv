@@ -1,0 +1,191 @@
+// oauthtoken_tests.nv — the token value, and the clock it does not
+// have.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: oauth2-nv.oauthtoken.<fn>`.
+//
+// EVERY TIME BELOW IS A LITERAL, and that is the module's design
+// showing through: `with_expires_in` takes the arrival time and
+// `is_expired` takes the current time, so an expiry test is arithmetic
+// on two dates rather than a test that sleeps.
+
+use std.test
+use std.list
+use std.str
+use arith
+use civil
+use span
+use oauthtoken
+
+// Midnight on 11 September 2026 — the moment a token arrives.
+fn arrived() -> civil.CivilDateTime
+    match civil.date(2026, 9, 11)
+        Ok(d)  => civil.datetime(d, civil.midnight())
+        Err(_) => civil.datetime(civil.date_from_epoch_day(0), civil.midnight())
+
+// `secs` seconds after `arrived()`.
+fn later(secs: Int) -> civil.CivilDateTime
+    match arith.add_delta(arrived(), span.seconds(secs))
+        Ok(dt) => dt
+        Err(_) => arrived()
+
+@test
+fn test_a_bare_token_has_no_expiry_and_no_refresh() [io]
+    test.case("what `token` builds")
+    let t = oauthtoken.token("2YotnFZFEjr1zCsicMWpAA")
+    test.assert_eq_str(t.access_token, "2YotnFZFEjr1zCsicMWpAA")
+    test.assert_eq_str(t.refresh_token, "")
+    test.assert(not oauthtoken.has_expiry(t))
+
+@test
+fn test_the_token_type_is_compared_case_insensitively() [io]
+    // RFC 6749 § 7.1 says so, and every provider spells it
+    // differently.
+    test.case("three spellings, one type")
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.token_type_named("bearer")),
+                       "Bearer")
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.token_type_named("Bearer")),
+                       "Bearer")
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.token_type_named("BEARER")),
+                       "Bearer")
+
+    test.case("DPoP and the abandoned MAC draft are named rather than unknown")
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.token_type_named("dpop")),
+                       "DPoP")
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.OauthMac), "mac")
+
+    test.case("and anything else keeps its spelling")
+    match oauthtoken.token_type_named("Vendor-Thing")
+        OauthTokenTypeOther(n) => test.assert_eq_str(n, "Vendor-Thing")
+        _                      => test.assert(false)
+
+@test
+fn test_expires_in_is_counted_from_the_arrival_the_caller_supplied() [io]
+    test.case("an hour from midnight")
+    match oauthtoken.with_expires_in(oauthtoken.token("a"), 3600, arrived())
+        Err(_) => test.assert(false)
+        Ok(t)  =>
+            test.assert(oauthtoken.has_expiry(t))
+            test.assert(not oauthtoken.is_expired(t, later(3000), 0))
+            test.assert(oauthtoken.is_expired(t, later(3601), 0))
+
+    test.case("and an absurd expires_in leaves the calendar rather than wrapping")
+    match oauthtoken.with_expires_in(oauthtoken.token("a"), 9000000000000, arrived())
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_leeway_is_the_clients_own_margin() [io]
+    match oauthtoken.with_expires_in(oauthtoken.token("a"), 3600, arrived())
+        Err(_) => test.assert(false)
+        Ok(t)  =>
+            test.case("thirty seconds before the expiry, with no leeway, it is alive")
+            test.assert(not oauthtoken.is_expired(t, later(3570), 0))
+
+            test.case("with thirty seconds of leeway it is already dead")
+            test.assert(oauthtoken.is_expired(t, later(3570), 30))
+
+@test
+fn test_a_token_with_no_expiry_is_not_a_token_that_never_expires() [io]
+    // The server did not say.  The right reading is "refresh on the
+    // first 401", not "this lasts forever" — so `is_expired` answers
+    // false and `has_expiry` is the question that tells them apart.
+    test.case("is_expired says no, because nothing says yes")
+    let t = oauthtoken.token("a")
+    test.assert(not oauthtoken.is_expired(t, later(999999), 0))
+
+    test.case("has_expiry is the honest question")
+    test.assert(not oauthtoken.has_expiry(t))
+
+    test.case("and seconds_left answers None rather than a number")
+    test.assert_none(oauthtoken.seconds_left(t, arrived()))
+
+@test
+fn test_an_explicit_expiry_is_the_other_constructor() [io]
+    test.case("a caller who computed the instant elsewhere")
+    let t = oauthtoken.with_expires_at(oauthtoken.token("a"), later(60))
+    test.assert(oauthtoken.has_expiry(t))
+    test.assert_some(oauthtoken.seconds_left(t, arrived()))
+
+@test
+fn test_seconds_left_goes_negative_rather_than_clamping() [io]
+    match oauthtoken.with_expires_in(oauthtoken.token("a"), 60, arrived())
+        Err(_) => test.assert(false)
+        Ok(t)  =>
+            test.case("before")
+            match oauthtoken.seconds_left(t, arrived())
+                None    => test.assert(false)
+                Some(n) => test.assert(n == 60)
+
+            test.case("after — a caller logging `how long dead` needs the sign")
+            match oauthtoken.seconds_left(t, later(90))
+                None    => test.assert(false)
+                Some(n) => test.assert(n == 0 - 30)
+
+@test
+fn test_needs_refresh_is_false_without_a_refresh_token() [io]
+    // A caller looping on `needs_refresh` with nothing to refresh with
+    // would loop forever.
+    test.case("expired, and nothing to refresh with")
+    match oauthtoken.with_expires_in(oauthtoken.token("a"), 60, arrived())
+        Err(_) => test.assert(false)
+        Ok(t)  =>
+            test.assert(oauthtoken.is_expired(t, later(120), 0))
+            test.assert(not oauthtoken.needs_refresh(t, later(120), 0))
+
+    test.case("expired, with one")
+    match oauthtoken.with_expires_in(oauthtoken.with_refresh(oauthtoken.token("a"), "r"),
+                                     60, arrived())
+        Err(_) => test.assert(false)
+        Ok(t)  => test.assert(oauthtoken.needs_refresh(t, later(120), 0))
+
+@test
+fn test_the_authorization_header_refuses_a_type_it_cannot_build() [io]
+    test.case("a bearer token")
+    match oauthtoken.authorization_header(oauthtoken.token("2YotnFZFEjr1zCsicMWpAA"))
+        Err(_) => test.assert(false)
+        Ok(h)  => test.assert_eq_str(h, "Bearer 2YotnFZFEjr1zCsicMWpAA")
+
+    test.case("a DPoP token needs a proof this package does not hold, so it refuses")
+    let t = oauthtoken.token("a")
+    let dpop = OauthToken { access_token: t.access_token,
+                            token_type: oauthtoken.OauthDpop,
+                            expires_at: t.expires_at,
+                            refresh_token: t.refresh_token,
+                            scope: t.scope,
+                            id_token: t.id_token,
+                            raw_json: t.raw_json }
+    match oauthtoken.authorization_header(dpop)
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_an_absent_scope_member_means_what_you_asked_for() [io]
+    // RFC 6749 § 5.1 makes `scope` required only when the grant
+    // DIFFERS from the request, so an empty one is not "nothing".
+    test.case("no scope member: granted_scopes is empty")
+    let t = oauthtoken.token("a")
+    test.assert(list.len(oauthtoken.granted_scopes(t)) == 0)
+
+    test.case("and `covers` answers true for what was requested anyway")
+    test.assert(oauthtoken.covers(t, ["openid", "email"]))
+
+    test.case("has_scope is the narrow question and answers false")
+    test.assert(not oauthtoken.has_scope(t, "openid"))
+
+@test
+fn test_the_raw_response_is_kept_for_the_fields_nobody_standardised() [io]
+    test.case("a provider's own member")
+    let t = oauthtoken.token("a")
+    test.assert_none(oauthtoken.extra(t, "resource_owner_id"))
+
+    test.case("and a numeric one, for the *_expires_in fields providers invent")
+    test.assert_none(oauthtoken.extra_int(t, "refresh_token_expires_in"))
+
+@test
+fn test_a_token_redacted_carries_no_credential() [io]
+    test.case("the access token is not in the redaction")
+    let t = oauthtoken.with_refresh(oauthtoken.token("ya29.a-real-looking-token"), "1//refresh")
+    let line = oauthtoken.redacted(t)
+    test.assert(not str.contains(line, "ya29.a-real-looking-token"))
+    test.assert(not str.contains(line, "1//refresh"))

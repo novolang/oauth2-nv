@@ -1,0 +1,318 @@
+// oautherr.nv — every way a client flow ends badly, as one enum.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THREE POPULATIONS IN ONE TYPE, and the reason they are one type is
+// that a caller cannot tell them apart at the call site.  A token
+// request comes back with `invalid_grant` (the wire, RFC 6749 § 5.2),
+// or the socket did not open at all (this machine), or the `state` in
+// the callback is not the one this client sent (this library refusing
+// on the caller's behalf).  All three end the same exchange, so all
+// three are the same `Result`'s error.
+//
+// WHAT THE PREDICATES ARE FOR.  `fault_code` answers the wire spelling
+// and `is_retryable`, `is_pending`, `needs_user_action` and
+// `is_configuration_fault` answer the four questions a caller actually
+// has: try again, keep polling, send the person somewhere, or stop and
+// fix the deployment.  A client that branches on the code string
+// instead gets `authorization_pending` wrong — it is not an error at
+// all in the device flow, it is the expected answer for most of a
+// minute.
+//
+// `is_client_safe` is the one to read before putting any of this in
+// front of an end user.  An authorization server's `error_description`
+// is free text from another party's server; it is fine in a log and it
+// does not belong interpolated into a page.
+
+// Everything that ends a client flow.
+//
+// The wire codes are RFC 6749 § 5.2 (the token endpoint),
+// RFC 6749 § 4.1.2.1 (the authorization endpoint) and RFC 8628 § 3.5
+// (the device flow's polling answers).  Each carries the
+// `error_description` and `error_uri` the server sent, which are
+// optional in the specification and empty when absent.
+pub enum OauthFault
+    // RFC 6749 § 5.2 — the token endpoint's six.
+    //
+    // The request was missing a parameter, repeated one, or was
+    // otherwise malformed.
+    OauthInvalidRequest(description: Str, uri: Str)
+    // Client authentication failed.  The status is 401 when the server
+    // used `WWW-Authenticate`, which is why this is a variant rather
+    // than a status code.
+    OauthInvalidClient(description: Str, uri: Str)
+    // The authorization code, refresh token or device code is invalid,
+    // expired, revoked, or was issued to another client.  This is the
+    // one every client meets: it is also what a server answers when
+    // the PKCE verifier does not match the challenge.
+    OauthInvalidGrant(description: Str, uri: Str)
+    // This client is not allowed to use this grant type.
+    OauthUnauthorizedClient(description: Str, uri: Str)
+    // The server does not support this grant type at all.
+    OauthUnsupportedGrantType(description: Str, uri: Str)
+    // The scope asked for is invalid, unknown, or exceeds what the
+    // resource owner granted.
+    OauthInvalidScope(description: Str, uri: Str)
+
+    // RFC 6749 § 4.1.2.1 — the authorization endpoint adds three.
+    //
+    // The response type asked for is not one the server issues.
+    OauthUnsupportedResponseType(description: Str, uri: Str)
+    // The server met an unexpected condition.  A 500 it could not put
+    // in a redirect.
+    OauthServerError(description: Str, uri: Str)
+    // The server is overloaded or down for maintenance.  A 503 it
+    // could not put in a redirect.
+    OauthTemporarilyUnavailable(description: Str, uri: Str)
+
+    // RFC 8628 § 3.5 — the device flow's four polling answers.
+    //
+    // NOT AN ERROR.  The end user has not finished at the verification
+    // page yet, and the correct response is to wait `interval` seconds
+    // and poll again.  It is in this enum because it arrives through
+    // the same `Result`, and `is_pending` is what a caller branches on.
+    OauthAuthorizationPending
+    // Poll less often.  The interval carried here is the new one: the
+    // specification says add five seconds to the current interval, and
+    // a client that ignores this is rate-limited off the endpoint.
+    OauthSlowDown(interval_secs: Int)
+    // The end user refused, at the verification page or at the
+    // consent screen.  A final answer: do not poll again.
+    OauthAccessDenied(description: Str)
+    // The device code expired before the end user finished.  Start
+    // the flow again with a new device code.
+    OauthExpiredToken
+
+    // This client's own refusals — nothing on the wire says these.
+    //
+    // The `state` in the callback is not the one this flow sent.  The
+    // request came from somewhere else, which is what `state` exists
+    // to detect (RFC 6749 § 10.12).  Both values are carried so a log
+    // can show them; neither belongs in front of an end user.
+    OauthStateMismatch(expected: Str, received: Str)
+    // The `nonce` claim in the id_token is not the one this flow sent
+    // (OpenID Connect Core § 3.1.3.7 step 11).  A replayed id_token.
+    OauthNonceMismatch(expected: Str, received: Str)
+    // The `iss` in the id_token, or in the discovery document, is not
+    // the issuer this flow was configured with.
+    OauthIssuerMismatch(expected: Str, received: Str)
+    // The operating system's generator answered nothing, so no
+    // `state`, `nonce` or PKCE verifier was minted.  A flow refuses
+    // rather than continuing with a predictable value.
+    OauthNoEntropy
+    // The exchange did not complete: no connection, no reply, a reply
+    // that was not read.  The detail is for a log.
+    OauthTransport(detail: Str)
+    // A reply arrived and was not the shape RFC 6749 § 5.1 describes:
+    // not JSON, or JSON that is not an object.
+    OauthMalformedResponse(detail: Str)
+    // A required member was absent from an otherwise well-formed
+    // response — `access_token`, `token_type`, `device_code`.
+    OauthMissingField(field: Str)
+    // The server sent an `error` this library does not know.  Kept
+    // verbatim rather than folded into `server_error`, because an
+    // extension code a caller recognises is more useful than a
+    // generic one it does not.
+    OauthUnknownErrorCode(code: Str, description: Str)
+    // The id_token did not validate.  The reason names which of
+    // OpenID Connect Core § 3.1.3.7's steps refused it.
+    OauthIdTokenRejected(reason: Str)
+    // The discovery document parsed and did not carry a member this
+    // flow needs.
+    OauthDiscoveryIncomplete(field: Str)
+    // An endpoint URL that is not `https`.  Refused rather than
+    // warned about: an authorization request over `http` puts the
+    // authorization code in every proxy log between here and there,
+    // and a token request over `http` puts the client secret there.
+    OauthInsecureEndpoint(url: Str)
+
+// The standard `Error` implementation, so a refused flow is reported
+// by anything that reports errors.
+impl Error for OauthFault
+    // The one-line report: what the exchange was, what the answer was,
+    // and — for the three mismatches — that this library refused rather
+    // than the server.  A reader who cannot tell those apart cannot
+    // tell a misconfiguration from an attack.
+    fn message(self) -> Str
+        todo("oauth2-nv.oautherr.OauthFault.message")
+
+// The wire spelling of a fault that has one: `invalid_grant`,
+// `slow_down`, `authorization_pending`.
+//
+// Empty for this client's own refusals, which is the test for "did the
+// server say this?".
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println(oautherr.fault_code(oautherr.OauthExpiredToken))
+// ```
+pub fn fault_code(f: OauthFault) -> Str []
+    todo("oauth2-nv.oautherr.fault_code")
+
+// A wire code and its optional description and URI, as a fault.
+//
+// An unrecognised code becomes `OauthUnknownErrorCode` carrying the
+// spelling, rather than being folded into `server_error`: an
+// authorization server's extension code that a caller recognises is
+// more use than a generic one it does not.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println(oautherr.fault_code(oautherr.fault_named("invalid_grant", "", "")))
+// ```
+pub fn fault_named(code: Str, description: Str, uri: Str) -> OauthFault []
+    todo("oauth2-nv.oautherr.fault_named")
+
+// The server's `error_description`, or empty where there was none.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println(oautherr.fault_description(oautherr.OauthNoEntropy))
+// ```
+pub fn fault_description(f: OauthFault) -> Str []
+    todo("oauth2-nv.oautherr.fault_description")
+
+// The server's `error_uri`, or empty where there was none.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println(oautherr.fault_uri(oautherr.OauthNoEntropy))
+// ```
+pub fn fault_uri(f: OauthFault) -> Str []
+    todo("oauth2-nv.oautherr.fault_uri")
+
+// Whether sending the same request again could succeed.
+//
+// True for `temporarily_unavailable`, `server_error` and a transport
+// failure; false for everything the server decided about this client
+// or this grant.  A client that retries `invalid_grant` retries
+// forever.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println("${oautherr.is_retryable(oautherr.OauthExpiredToken)}")
+// ```
+pub fn is_retryable(f: OauthFault) -> Bool []
+    todo("oauth2-nv.oautherr.is_retryable")
+
+// Whether the device flow should keep polling.
+//
+// True for `authorization_pending` and `slow_down` and nothing else.
+// This is the predicate that makes `device_poll` usable: both of those
+// arrive as an error and neither of them means the flow failed.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println("${oautherr.is_pending(oautherr.OauthAuthorizationPending)}")
+// ```
+pub fn is_pending(f: OauthFault) -> Bool []
+    todo("oauth2-nv.oautherr.is_pending")
+
+// The number of seconds to wait before polling again, given the
+// interval the device grant asked for.
+//
+// `slow_down` carries its own; `authorization_pending` keeps the
+// grant's; everything else answers zero, because nothing else should
+// poll.  RFC 8628 § 3.5 says a `slow_down` adds five seconds, and
+// that arithmetic lives here rather than in every caller's loop.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println("${oautherr.poll_delay(oautherr.OauthAuthorizationPending, 5)}")
+// ```
+pub fn poll_delay(f: OauthFault, grant_interval_secs: Int) -> Int []
+    todo("oauth2-nv.oautherr.poll_delay")
+
+// Whether the end user has to do something before this can succeed:
+// go to the verification page, consent, or pick another account.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println("${oautherr.needs_user_action(oautherr.OauthAccessDenied(""))}")
+// ```
+pub fn needs_user_action(f: OauthFault) -> Bool []
+    todo("oauth2-nv.oautherr.needs_user_action")
+
+// Whether this is a deployment that is wrong rather than a request
+// that failed: an unregistered redirect URI, an unsupported grant
+// type, a client secret that is not the one the server holds, an
+// endpoint that is not `https`.
+//
+// The one a client should surface loudly in development and page
+// somebody about in production, because retrying cannot fix it.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     let f = oautherr.OauthInsecureEndpoint("http://token.example")
+//     println("${oautherr.is_configuration_fault(f)}")
+// ```
+pub fn is_configuration_fault(f: OauthFault) -> Bool []
+    todo("oauth2-nv.oautherr.is_configuration_fault")
+
+// Whether the fault's text may be shown to an end user.
+//
+// False for everything carrying a server's free-text
+// `error_description`, which is another party's string and does not
+// belong interpolated into a page; false for the three mismatches,
+// whose values are a log's business.  True for the handful whose whole
+// content is "the sign-in was refused" or "it took too long".
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println("${oautherr.is_client_safe(oautherr.OauthExpiredToken)}")
+// ```
+pub fn is_client_safe(f: OauthFault) -> Bool []
+    todo("oauth2-nv.oautherr.is_client_safe")
+
+// The HTTP status a resource server should answer with when a fault
+// reaches it while it was acting as a client.
+//
+// A gateway that exchanged a code on a browser's behalf has to answer
+// the browser something, and two handlers deciding that separately
+// will disagree — a 500 for `access_denied` tells a browser to retry a
+// sign-in the person deliberately cancelled.
+//
+// ```novo
+// use oautherr
+//
+// fn main() [io]
+//     println("${oautherr.status_for(oautherr.OauthAccessDenied(""))}")
+// ```
+pub fn status_for(f: OauthFault) -> Int []
+    todo("oauth2-nv.oautherr.status_for")
+
+// Every code this library reads, as strings a person can read.
+//
+// The list IS the contract: a caller can print it in a diagnostic,
+// and adding to it is a minor bump.  A code outside it becomes
+// `OauthUnknownErrorCode` rather than being guessed at.
+//
+// ```novo
+// use std.list
+// use oautherr
+//
+// fn main() [io]
+//     println("${list.len(oautherr.known_codes())}")
+// ```
+pub fn known_codes() -> [Str] []
+    todo("oauth2-nv.oautherr.known_codes")

@@ -1,0 +1,407 @@
+// oauthdisc.nv — where an authorization server says what it is, and
+// the JWKS whose keys sign what it issues.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// TWO `.well-known` PATHS, AND THEY ARE NOT THE SAME URL.  This is the
+// part of discovery that is quietly wrong in most clients.
+//
+//   OpenID Connect Discovery 1.0 § 4 says: APPEND
+//   `/.well-known/openid-configuration` to the issuer.
+//   RFC 8414 § 3.1 says: INSERT `/.well-known/oauth-authorization-server`
+//   between the issuer's host and its path.
+//
+// For an issuer with no path they agree.  For `https://id.example/tenant-a`
+// — which is what every multi-tenant deployment looks like — they give
+// `https://id.example/tenant-a/.well-known/openid-configuration` and
+// `https://id.example/.well-known/oauth-authorization-server/tenant-a`.
+// Different addresses.  So this module publishes both builders by
+// name, `fetch` tries them in that order, and neither is called "the"
+// well-known URL.
+//
+// THE ISSUER CHECK IS NOT OPTIONAL.  § 4.3 requires the `issuer`
+// member of the document to equal the issuer it was fetched from.
+// Without it, a redirect from the discovery URL to an attacker's
+// document hands the client an attacker's token endpoint, and the
+// client then posts its authorization code — or its client secret — to
+// whatever that document names.  `fetch` performs the check; `read` is
+// the parse alone, and `check_issuer` is published so a caller that
+// read a cached document can perform it themselves.
+//
+// A DOCUMENT IS CACHEABLE AND KEYS ROTATE.  Discovery answers a
+// document that changes rarely; a JWKS answers keys that change on the
+// provider's own schedule, and a client that fetches one per token
+// validation is a client that rate-limits itself off the endpoint.
+// Both fetches are separate calls for exactly that reason — this
+// package holds no cache and has no clock to expire one with, so the
+// caching is the caller's and the shape of it is theirs to choose.
+
+use jwtalg
+use oautherr
+
+// What an authorization server says about itself
+// (RFC 8414 § 2, OpenID Connect Discovery 1.0 § 3).
+//
+// Every member is a string or a list of strings; an absent member is
+// empty.  The optional ones are absent often enough that a `?` on each
+// would be noise — `supports_pkce` and the other predicates are how a
+// caller asks whether the server named something.
+pub struct OauthProvider
+    // REQUIRED.  The issuer identifier, which the document's own URL
+    // must match.
+    issuer: Str
+    // REQUIRED for every flow that sends an end user anywhere.
+    authorization_endpoint: Str
+    // REQUIRED for every flow but the implicit one, which this package
+    // does not implement.
+    token_endpoint: Str
+    // RFC 8628 § 4.  Absent from a server that does not do the device
+    // flow, which is most of them.
+    device_authorization_endpoint: Str
+    // OpenID Connect Core § 5.3.
+    userinfo_endpoint: Str
+    // REQUIRED where id_tokens are issued: where the signing keys are.
+    jwks_uri: Str
+    // RFC 7009.
+    revocation_endpoint: Str
+    // RFC 7662.
+    introspection_endpoint: Str
+    // OpenID Connect RP-Initiated Logout 1.0 § 2.
+    end_session_endpoint: Str
+    // OpenID Connect Dynamic Client Registration 1.0 § 3.
+    registration_endpoint: Str
+    // What the server will grant.  RECOMMENDED rather than required,
+    // so an empty list means "the server did not say", never "none".
+    scopes_supported: [Str]
+    // `code` for everything this package does.
+    response_types_supported: [Str]
+    // `query`, `fragment`, `form_post`.
+    response_modes_supported: [Str]
+    // The grant type URNs.  An empty list means the § 2 default —
+    // `authorization_code` and `implicit` — which is the reading a
+    // client checking for `refresh_token` support has to know.
+    grant_types_supported: [Str]
+    // RFC 7636 § 4.2's methods.  An EMPTY list is the one a client
+    // must not read as "PKCE works": RFC 8414 § 2 says a server that
+    // omits this does not support PKCE, and sending a challenge to one
+    // is sending a parameter it ignores — which means the exchange is
+    // not protected and nothing says so.
+    code_challenge_methods_supported: [Str]
+    // How the token endpoint authenticates a client.  An empty list
+    // means the § 2 default, `client_secret_basic`.
+    token_endpoint_auth_methods_supported: [Str]
+    // The algorithms id_tokens are signed with.  What
+    // `oauthoidc.policy_for` turns into jwt-nv's allow-list, and the
+    // reason that list is never "whatever the token's header says".
+    id_token_signing_alg_values_supported: [Str]
+    // The `sub` types: `public` or `pairwise`.
+    subject_types_supported: [Str]
+    // The document as it arrived, for the members this struct does not
+    // model — every provider adds some.
+    raw_json: Str
+
+// The OpenID Connect discovery URL for an issuer: the issuer with
+// `/.well-known/openid-configuration` APPENDED
+// (OpenID Connect Discovery 1.0 § 4).
+//
+// Preserves a path, so `https://id.example/tenant-a` becomes
+// `https://id.example/tenant-a/.well-known/openid-configuration`.
+// Refuses a non-`https` issuer and an issuer carrying a query or a
+// fragment, both of which § 3 forbids.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.openid_url("https://id.example/tenant-a")
+//         Ok(u)  => println(u)
+//         Err(_) => println("not an issuer")
+// ```
+pub fn openid_url(issuer: Str) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthdisc.openid_url")
+
+// The RFC 8414 discovery URL for an issuer:
+// `/.well-known/oauth-authorization-server` INSERTED between the host
+// and the path (§ 3.1).
+//
+// The other answer, and it differs from `openid_url` for every issuer
+// with a path.  Published by name rather than chosen silently, because
+// a client that tries only one against a server that publishes only
+// the other reports "no discovery document" for a server that has one.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.oauth_url("https://id.example/tenant-a")
+//         Ok(u)  => println(u)
+//         Err(_) => println("not an issuer")
+// ```
+pub fn oauth_url(issuer: Str) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthdisc.oauth_url")
+
+// Both discovery URLs for an issuer, in the order `fetch` tries them.
+//
+// The list IS the contract: a caller can print it in a diagnostic, and
+// a deployment behind a firewall can fetch them itself and call `read`.
+//
+// ```novo
+// use std.list
+// use oauthdisc
+//
+// fn main() [io]
+//     println("${list.len(oauthdisc.discovery_urls("https://id.example"))}")
+// ```
+pub fn discovery_urls(issuer: Str) -> [Str] []
+    todo("oauth2-nv.oauthdisc.discovery_urls")
+
+// Parse a discovery document.
+//
+// The parse alone: no fetch, no issuer check.  For a caller that has
+// the document from a cache, a configuration file, or a fetch it made
+// itself — and for every test in this package, which is the point.
+//
+// Refuses a body that is not a JSON object and one with no `issuer`,
+// which RFC 8414 § 2 makes required.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Ok(p)  => println(p.issuer)
+//         Err(_) => println("not a discovery document")
+// ```
+pub fn read(body: Str) -> Result<OauthProvider, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthdisc.read")
+
+// Whether a document's `issuer` is the one it was fetched from
+// (OpenID Connect Discovery 1.0 § 4.3).
+//
+// `None` when they match.  The check that stops a redirected discovery
+// fetch from handing a client an attacker's token endpoint — and the
+// comparison is EXACT, because § 4.3 says so: a trailing slash is a
+// different issuer.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no document")
+//         Ok(p)  =>
+//             match oauthdisc.check_issuer(p, "https://id.example")
+//                 Some(_) => println("the document is for another issuer")
+//                 None    => println("matches")
+// ```
+pub fn check_issuer(p: OauthProvider, issuer: Str) -> ?oautherr.OauthFault []
+    todo("oauth2-nv.oauthdisc.check_issuer")
+
+// Fetch and check a discovery document for an issuer.
+//
+// Tries `openid_url` and then `oauth_url`, parses, and performs the
+// issuer check — all three, because a fetch without the check is the
+// vulnerability and a client that has to remember to call a second
+// function is a client that will not.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io, net, async]
+//     match oauthdisc.fetch("https://id.example")
+//         Ok(p)  => println(p.token_endpoint)
+//         Err(_) => println("no usable discovery document")
+// ```
+pub fn fetch(issuer: Str) -> Result<OauthProvider, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthdisc.fetch")
+
+// Fetch a document from an exact URL, and check its `issuer` against
+// the issuer the caller expects.
+//
+// For a deployment whose discovery document is not at either
+// `.well-known` path — a gateway, a mirror, a test double.  The issuer
+// check still happens, because the reason for it does not change.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io, net, async]
+//     match oauthdisc.fetch_at("https://mirror.example/oidc.json", "https://id.example")
+//         Ok(p)  => println(p.token_endpoint)
+//         Err(_) => println("no usable discovery document")
+// ```
+pub fn fetch_at(url: Str,
+                expect_issuer: Str) -> Result<OauthProvider, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthdisc.fetch_at")
+
+// Whether the server said it supports PKCE with `S256`.
+//
+// An EMPTY `code_challenge_methods_supported` answers `false`, which
+// is RFC 8414 § 2's reading and the answer that matters: a client that
+// reads an absent list as "probably fine" sends a `code_challenge` the
+// server ignores, and the exchange is then unprotected with nothing
+// saying so.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no")
+//         Ok(p)  => println("${oauthdisc.supports_pkce(p)}")
+// ```
+pub fn supports_pkce(p: OauthProvider) -> Bool []
+    todo("oauth2-nv.oauthdisc.supports_pkce")
+
+// Whether the server named a grant type.
+//
+// An empty `grant_types_supported` answers as RFC 8414 § 2's default
+// does: `authorization_code` and `implicit` are supported and nothing
+// else is, so a client asking about `refresh_token` against a silent
+// server gets `false`.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no")
+//         Ok(p)  => println("${oauthdisc.supports_grant(p, "refresh_token")}")
+// ```
+pub fn supports_grant(p: OauthProvider, grant_type: Str) -> Bool []
+    todo("oauth2-nv.oauthdisc.supports_grant")
+
+// Whether the server named a client authentication method.
+//
+// An empty list answers as § 2's default does: `client_secret_basic`
+// and nothing else.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no")
+//         Ok(p)  => println("${oauthdisc.supports_auth_method(p, "client_secret_post")}")
+// ```
+pub fn supports_auth_method(p: OauthProvider, method: Str) -> Bool []
+    todo("oauth2-nv.oauthdisc.supports_auth_method")
+
+// The members a named flow needs that this document does not carry.
+//
+// Answers EVERY missing member rather than the first, because a
+// deployment that discovers its provider cannot do the device flow
+// wants to be told that once rather than three times.  The flow names
+// are `authorization_code`, `client_credentials`, `device_code` and
+// `refresh_token`.
+//
+// ```novo
+// use std.list
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no")
+//         Ok(p)  => println("${list.len(oauthdisc.missing_for(p, "device_code"))}")
+// ```
+pub fn missing_for(p: OauthProvider, flow: Str) -> [Str] []
+    todo("oauth2-nv.oauthdisc.missing_for")
+
+// A member of the document this struct does not model.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no")
+//         Ok(p)  =>
+//             match oauthdisc.extra(p, "service_documentation")
+//                 Some(v) => println(v)
+//                 None    => println("absent")
+// ```
+pub fn extra(p: OauthProvider, member: Str) -> ?Str []
+    todo("oauth2-nv.oauthdisc.extra")
+
+// ── The keys ─────────────────────────────────────────────────────────
+
+// Fetch the JWKS document at a provider's `jwks_uri`, as raw JSON.
+//
+// Raw rather than parsed, so a caller can cache the bytes and parse
+// them when a key is actually needed — and so a JWKS carrying a key
+// type this package cannot read does not fail the whole fetch.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io, net, async]
+//     match oauthdisc.read("{}")
+//         Err(_) => println("no")
+//         Ok(p)  =>
+//             match oauthdisc.fetch_jwks(p)
+//                 Ok(doc) => println(doc)
+//                 Err(_)  => println("no keys")
+// ```
+pub fn fetch_jwks(p: OauthProvider) -> Result<Str, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthdisc.fetch_jwks")
+
+// A JWKS document as jwt-nv verifying keys (RFC 7517 § 5).
+//
+// SKIPS what it cannot read rather than refusing the document: a real
+// JWKS carries the provider's whole key set, including encryption keys
+// and key types this package does not do, and a client that refused
+// the set because one member was an `oct` key would be unable to
+// verify anything.  A key with no `kid` is skipped too, because the
+// only way to select among several is by `kid`.
+//
+// Refuses only a body that is not an object with a `keys` array.
+//
+// ```novo
+// use std.list
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read_jwks("{\"keys\":[]}")
+//         Ok(ks) => println("${list.len(ks)}")
+//         Err(_) => println("not a JWKS")
+// ```
+pub fn read_jwks(body: Str) -> Result<[jwtalg.JwtVerifyingKey], oautherr.OauthFault> []
+    todo("oauth2-nv.oauthdisc.read_jwks")
+
+// The members of a JWKS this package could not read, as a list of
+// `kid`s and why.
+//
+// The other half of `read_jwks`'s skipping: a deployment whose
+// id_tokens stop validating after a key rotation needs to see that the
+// new key was skipped, and a function that only ever returns what
+// worked cannot tell it.
+//
+// ```novo
+// use std.list
+// use oauthdisc
+//
+// fn main() [io]
+//     println("${list.len(oauthdisc.jwks_skipped("{\"keys\":[]}"))}")
+// ```
+pub fn jwks_skipped(body: Str) -> [Str] []
+    todo("oauth2-nv.oauthdisc.jwks_skipped")
+
+// The key with a given `kid`, or `None`.
+//
+// jwt-nv's `jwtalg.key_for_kid` under this package's name, so a caller
+// selecting a key for an id_token does not have to reach past
+// `oauthdisc` for it.
+//
+// ```novo
+// use oauthdisc
+//
+// fn main() [io]
+//     match oauthdisc.read_jwks("{\"keys\":[]}")
+//         Err(_) => println("no")
+//         Ok(ks) =>
+//             match oauthdisc.key_for(ks, "2026-09")
+//                 Some(_) => println("found")
+//                 None    => println("no such key")
+// ```
+pub fn key_for(keys: [jwtalg.JwtVerifyingKey], kid: Str) -> ?jwtalg.JwtVerifyingKey []
+    todo("oauth2-nv.oauthdisc.key_for")

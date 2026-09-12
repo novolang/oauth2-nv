@@ -1,0 +1,110 @@
+[package]
+name        = "oauth2-nv"
+version     = "0.0.1"
+description = "OAuth 2 and OpenID Connect for a CLIENT: the authorization code flow with PKCE, client credentials, the device code flow and refresh, with the message arithmetic in an effect-free module and one function in the whole package that touches the network.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `host`, and the split inside it is the design.
+#
+# `oautherr`, `oauthmsg`, `oauthtoken` and `oauthoidc` are `[]`
+# throughout: a request is a list of pairs, a response is a string that
+# arrived from somewhere, an expiry is compared against a time the
+# caller passes in, and an id_token is checked against keys the caller
+# already holds.  Not one socket, and no clock.  That is what lets
+# every RFC 6749 § 4, § 5 and RFC 7636 vector be a test with no server
+# running, and it is what makes "did this client check `state`?" a
+# question a reader can answer by reading one function.
+#
+# `oauthflow` and `oauthdisc` are the half that performs.  Their rows
+# are measured rather than asserted:
+#
+#   [net, async]       — every token, device, revocation, introspection
+#                        and discovery request, because `http.client.post`
+#                        and `http.client.get_with_headers` cost exactly
+#                        that on this toolchain
+#   [fs, rand]         — minting `state`, `nonce` and the PKCE verifier,
+#                        because the operating system's generator is
+#                        `/dev/urandom` and reading a device is `[fs]`
+#   [net, time, async] — `oauthflow.device_wait` ALONE, which is the one
+#                        function in the package that sleeps
+#
+# The `[fs]` on the minting functions surprises every reader and it is
+# the honest row: see the README's "Two rows that are wider than they
+# look".
+layer       = "host"
+
+category    = "web"
+
+tags        = ["oauth", "oauth2", "openid-connect", "oidc", "pkce", "authorization-code", "device-code", "client-credentials", "authlib", "native-port"]
+repository  = "https://github.com/novolang/oauth2-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Client flows, and the value that makes the state check impossible to skip"
+
+[dependencies]
+# base64-nv is RFC 7636 § 4.2's `BASE64URL-ENCODE(SHA256(verifier))`
+# and RFC 6749 § 2.3.1's Basic credential, which are the two alphabets
+# and the two padding rules — the standard library's `bytes.to_base64`
+# is the padded standard alphabet only, so a PKCE challenge built with
+# it is rejected by every authorization server.
+base64-nv   = "^0.0.1"
+
+# calendar-nv is what an expiry IS.  A token response carries
+# `expires_in` as a count of seconds, which is a duration and not an
+# instant; turning it into one needs a civil date-time to add it to,
+# and comparing it later needs another.  Both arrive as arguments,
+# which is why `oauthtoken` has no clock.
+calendar-nv = "^0.0.2"
+
+# crypto-nv is SHA-256, twice: the PKCE challenge (RFC 7636 § 4.2) and
+# OpenID Connect Core § 3.1.3.6's `at_hash`, which is the left half of
+# the hash of the access token and the only thing that ties an
+# id_token to the token that arrived beside it.
+crypto-nv   = "^0.1.1"
+
+# form-nv is both directions of `application/x-www-form-urlencoded`.
+# `formurl.serialise` writes every token-endpoint body RFC 6749 § 4
+# specifies, and `formurl.parse_str` reads the redirect callback's
+# query — the read matters more than the write, because `get_all`
+# answers a callback that carried TWO `state` parameters, which the
+# standard library's `http.server.query_get` cannot: it answers the
+# first and drops the rest, and "the first `state`" is exactly the
+# value an attacker would like the client to check.
+form-nv     = "^0.0.1"
+
+# jwt-nv is the id_token.  `oauthoidc` is a policy over it and not a
+# second verifier: `jwtpolicy` already carries the algorithm allow-list,
+# the issuer and audience requirement, the leeway and the maximum
+# lifetime, and OpenID Connect adds exactly three checks on top —
+# `nonce`, `azp` and `at_hash`.  Writing a fourth JWT verifier here is
+# how a client ends up accepting `alg: none`.
+jwt-nv      = "^0.0.3"
+
+# rand-nv is the operating system's generator.  `state`, `nonce` and
+# the PKCE verifier are the three values in this package whose whole
+# purpose is that an attacker cannot predict them, and the standard
+# library's `rand` module is xoshiro256** — excellent for a shuffle and
+# not for any of these.  `rng.os_bytes` reads `/dev/urandom` and
+# answers `None` where there is none, which is why every minting
+# function answers a `Result` and `OauthNoEntropy` is a named fault
+# rather than a silently weaker token.
+rand-nv     = "^0.1.4"
+
+# url-nv is the authorization URL and the discovery URL.  RFC 3986
+# § 5.3 join is what turns an issuer into a `.well-known` address, and
+# `uri.parse` is what `oauthmsg.authorize_url` checks the scheme with —
+# an authorization request over `http` puts the authorization code in a
+# proxy's log, so it is refused by name rather than warned about.
+url-nv      = "^0.1.1"

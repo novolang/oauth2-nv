@@ -1,0 +1,488 @@
+// oauthflow.nv — the four client flows, performed.  The only module in
+// this package that opens a socket or reads a generator.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// ONE FUNCTION TOUCHES THE NETWORK.  `post_form` is the single
+// exchange: a form body to an endpoint, the client's credentials
+// attached the way the client says, the reply read as a string.  Every
+// flow below is `oauthmsg` arithmetic, one `post_form`, and more
+// `oauthmsg` arithmetic — which is what makes the package reviewable.
+// A reader asking "can this library reach the network anywhere I did
+// not expect?" reads one function.
+//
+// TWO ROWS THAT ARE WIDER THAN THEY LOOK, and both are measured rather
+// than asserted:
+//
+// `[fs, rand]` ON THE MINTING FUNCTIONS.  `state`, `nonce` and the
+// PKCE verifier are the three values whose entire purpose is that an
+// attacker cannot predict them.  The standard library's `rand` module
+// is xoshiro256**, which is not a cryptographic generator, so these go
+// through rand-nv's `rng.os_bytes` — and on this platform the
+// operating system's generator is the device `/dev/urandom`, so
+// reading it is `[fs]`.  A caller who sees `[fs]` on `new_state` and
+// wonders what file it is reading has found the right question: it is
+// the entropy device, and the row is the disclosure.  `begin_from`
+// exists for the caller who brought their own bytes, and it is `[]`.
+//
+// `[net, async]` ON EVERY EXCHANGE.  `http.client.post` costs exactly
+// that on this toolchain: `[net]` for the socket, `[async]` because
+// the client runs its own deadline task.  Neither is optional and
+// neither is this package's doing.
+//
+// `[net, time, async]` ON ONE FUNCTION.  `device_wait` sleeps between
+// polls, and it is the only function here that does.  `device_poll` is
+// one poll and does not sleep, so the loop can be the caller's — which
+// matters for a program that has to draw a spinner, answer a cancel
+// key or serve other requests while it waits.  A library that owned
+// the loop would take the program's main thread for a minute and a
+// half.
+
+use civil
+use oautherr
+use oauthmsg
+use oauthtoken
+
+// ── Minting the unpredictable values ─────────────────────────────────
+
+// A fresh `state`, from the operating system's generator.
+//
+// `OauthNoEntropy` where there is no generator — a flow refuses rather
+// than continuing with something guessable, because a predictable
+// `state` is a `state` check that passes for an attacker.
+//
+// ```novo
+// use oauthflow
+//
+// // Minting reads the operating system's generator, which is beyond
+// // [io], so the example writes its own `main`.
+// fn main() [io, fs, rand]
+//     match oauthflow.new_state()
+//         Ok(s)  => println("${str.len(s)}")
+//         Err(_) => println("no generator on this machine")
+// ```
+pub fn new_state() -> Result<Str, oautherr.OauthFault> [fs, rand]
+    todo("oauth2-nv.oauthflow.new_state")
+
+// A fresh `nonce`, from the same generator.
+//
+// ```novo
+// use oauthflow
+//
+// fn main() [io, fs, rand]
+//     match oauthflow.new_nonce()
+//         Ok(n)  => println("${str.len(n)}")
+//         Err(_) => println("no generator on this machine")
+// ```
+pub fn new_nonce() -> Result<Str, oautherr.OauthFault> [fs, rand]
+    todo("oauth2-nv.oauthflow.new_nonce")
+
+// A fresh PKCE `code_verifier`: `oauthmsg.verifier_bytes()` random
+// bytes, base64url without padding.
+//
+// ```novo
+// use oauthflow
+//
+// fn main() [io, fs, rand]
+//     match oauthflow.new_verifier()
+//         Ok(v)  => println("${str.len(v)}")
+//         Err(_) => println("no generator on this machine")
+// ```
+pub fn new_verifier() -> Result<Str, oautherr.OauthFault> [fs, rand]
+    todo("oauth2-nv.oauthflow.new_verifier")
+
+// ── Starting a flow ──────────────────────────────────────────────────
+
+// Mint a pending flow: a `state`, a PKCE verifier, and — when
+// `want_nonce` — a `nonce`.
+//
+// The value to store between sending the end user away and receiving
+// them back.  It holds a secret, so it is stored the way a secret is:
+// a server-side session, an encrypted cookie, or a table row that is
+// deleted on use.
+//
+// `want_nonce` is a parameter rather than always-on because the
+// `nonce` is only meaningful with an id_token — a plain OAuth 2 flow
+// that sends one is sending a parameter the server echoes nowhere.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, fs, rand]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     match oauthflow.begin(c, true)
+//         Ok(p)  => println("${str.len(p.state)}")
+//         Err(_) => println("no generator on this machine")
+// ```
+pub fn begin(c: oauthmsg.OauthClient,
+             want_nonce: Bool) -> Result<oauthmsg.OauthPending, oautherr.OauthFault> [fs, rand]
+    todo("oauth2-nv.oauthflow.begin")
+
+// The same, with the randomness supplied.
+//
+// `[]`, and that is the point: a test asserts an exact authorization
+// URL against fixed values, and a caller with its own generator — a
+// hardware token, a seeded source in a simulation — uses it rather
+// than the one this package would read.  Refuses a verifier outside
+// RFC 7636 § 4.1's grammar, because a flow that starts with one is a
+// flow that fails at the exchange.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let v = "0123456789012345678901234567890123456789012"
+//     match oauthflow.begin_from(c, "state-value", "", v)
+//         Ok(p)  => println(p.state)
+//         Err(_) => println("that is not a verifier")
+// ```
+pub fn begin_from(c: oauthmsg.OauthClient, state: Str, nonce: Str,
+                  verifier: Str) -> Result<oauthmsg.OauthPending, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthflow.begin_from")
+
+// ── The one exchange ─────────────────────────────────────────────────
+
+// A form body to a token-shaped endpoint, with this client's
+// credentials attached, and the reply as a string.
+//
+// The whole of this package's network surface.  `[net, async]`,
+// measured: `http.client.post` costs both, the second because the
+// client runs a deadline task around the request.
+//
+// Answers the body on a 2xx and a fault on anything else, with
+// `oauthmsg.fault_of` reading the error document — so a caller that
+// wants the raw body of a non-standard endpoint (an introspection
+// response, a provider's own userinfo) gets a string and parses it
+// itself.
+//
+// Refuses a non-`https` endpoint before opening anything, which is the
+// one check that has to happen before the socket rather than after.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     match oauthflow.post_form("https://id.example/token", c, [("grant_type", "x")])
+//         Ok(body) => println(body)
+//         Err(_)   => println("the exchange failed")
+// ```
+pub fn post_form(endpoint: Str, c: oauthmsg.OauthClient,
+                 params: [(Str, Str)]) -> Result<Str, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.post_form")
+
+// ── Authorization code with PKCE ─────────────────────────────────────
+
+// The address to send the end user to — `oauthmsg.authorize_url`,
+// named here so the two halves of the flow are found together.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let v = "0123456789012345678901234567890123456789012"
+//     match oauthflow.begin_from(c, "st", "", v)
+//         Err(_) => println("no")
+//         Ok(p)  =>
+//             match oauthflow.authorize_url("https://id.example/authorize", c, p)
+//                 Ok(u)  => println(u)
+//                 Err(_) => println("refused")
+// ```
+pub fn authorize_url(endpoint: Str, c: oauthmsg.OauthClient,
+                     p: oauthmsg.OauthPending) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthflow.authorize_url")
+
+// Exchange an authorization code for a token (RFC 6749 § 4.1.3,
+// RFC 7636 § 4.5).
+//
+// TAKES THE `OauthPending`, and that is the design: there is no
+// signature in this package that exchanges a code without the state
+// the flow sent, so the CSRF check is an argument rather than a step a
+// caller can forget.  The check runs here even for a caller that
+// already ran `oauthmsg.check_state` — the cheap check is not the one
+// that has to be trusted.
+//
+// `arrived_at` is what `expires_in` is counted from; pass a reading
+// taken before the call and the expiry errs early, which is the safe
+// direction.
+//
+// ```novo
+// use civil
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//             let v = "0123456789012345678901234567890123456789012"
+//             match oauthflow.begin_from(c, "st", "", v)
+//                 Err(_) => println("no")
+//                 Ok(p)  =>
+//                     let cb = oauthmsg.read_callback("code=abc&state=st")
+//                     match oauthflow.exchange_code("https://id.example/token", c, p, cb, now)
+//                         Ok(t)  => println(t.access_token)
+//                         Err(_) => println("the exchange failed")
+// ```
+pub fn exchange_code(endpoint: Str, c: oauthmsg.OauthClient, p: oauthmsg.OauthPending,
+                     cb: oauthmsg.OauthCallback,
+                     arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.exchange_code")
+
+// ── Client credentials ───────────────────────────────────────────────
+
+// A token in this program's own name (RFC 6749 § 4.4).
+//
+// Refuses a public client before sending anything: this grant
+// authenticates the CLIENT and a client with no credentials has
+// nothing to authenticate with, so the request would come back
+// `invalid_client` and the refusal here names the cause.
+//
+// ```novo
+// use civil
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             let c = oauthmsg.with_secret(oauthmsg.client("svc", ""), "s",
+//                                          oauthmsg.OauthAuthBasic)
+//             match oauthflow.client_credentials("https://id.example/token", c, ["api"], now)
+//                 Ok(t)  => println(t.access_token)
+//                 Err(_) => println("the exchange failed")
+// ```
+pub fn client_credentials(endpoint: Str, c: oauthmsg.OauthClient, scopes: [Str],
+                          arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.client_credentials")
+
+// ── Device code ──────────────────────────────────────────────────────
+
+// Ask for a device code (RFC 8628 § 3.1).
+//
+// The endpoint is the `device_authorization_endpoint`, which is NOT
+// the token endpoint — `oauthdisc.OauthProvider` carries both, and a
+// client that sends this to the token endpoint gets
+// `unsupported_grant_type`.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     let c = oauthmsg.client("tv", "")
+//     match oauthflow.device_begin("https://id.example/device", c, ["openid"])
+//         Ok(g)  => println(oauthmsg.device_prompt(g))
+//         Err(_) => println("the request failed")
+// ```
+pub fn device_begin(endpoint: Str, c: oauthmsg.OauthClient,
+                    scopes: [Str]) -> Result<oauthmsg.OauthDeviceGrant, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.device_begin")
+
+// ONE poll of the token endpoint for a device grant (RFC 8628 § 3.4).
+//
+// Does not sleep and does not loop, so the caller keeps its own main
+// loop — which is what a program with a spinner, a cancel key or other
+// work to do needs.  `oautherr.is_pending` is the predicate for "keep
+// going": `authorization_pending` and `slow_down` both arrive here as
+// an `Err` and neither means the flow failed.
+//
+// ```novo
+// use civil
+// use oauthflow
+// use oautherr
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             let c = oauthmsg.client("tv", "")
+//             match oauthflow.device_begin("https://id.example/device", c, [])
+//                 Err(_) => println("no grant")
+//                 Ok(g)  =>
+//                     match oauthflow.device_poll("https://id.example/token", c, g, now)
+//                         Ok(t)  => println(t.access_token)
+//                         Err(f) => println("${oautherr.is_pending(f)}")
+// ```
+pub fn device_poll(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDeviceGrant,
+                   arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.device_poll")
+
+// Poll until the end user finishes, sleeping between attempts.
+//
+// The convenience over `device_poll`, and the ONLY function in this
+// package that sleeps — which is what the `[time]` in its row is.
+// Honours `slow_down` by adding RFC 8628 § 3.5's five seconds, and
+// stops at the grant's `expires_in` with `OauthExpiredToken` rather
+// than polling a dead code forever.
+//
+// Takes the main thread for as long as the end user takes, so a
+// program that has other work to do should call `device_poll` from its
+// own loop instead.
+//
+// ```novo
+// use civil
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, time, async]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             let c = oauthmsg.client("tv", "")
+//             match oauthflow.device_begin("https://id.example/device", c, [])
+//                 Err(_) => println("no grant")
+//                 Ok(g)  =>
+//                     match oauthflow.device_wait("https://id.example/token", c, g, now)
+//                         Ok(t)  => println(t.access_token)
+//                         Err(_) => println("the end user did not finish")
+// ```
+pub fn device_wait(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDeviceGrant,
+                   started_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, time, async]
+    todo("oauth2-nv.oauthflow.device_wait")
+
+// ── Refresh ──────────────────────────────────────────────────────────
+
+// Exchange a refresh token for a new access token (RFC 6749 § 6).
+//
+// Carries the OLD token's refresh token into the new one where the
+// server did not issue a replacement, which is § 6's reading and the
+// thing a client that does not do it loses its session over: a server
+// that rotates refresh tokens sends a new one and a server that does
+// not sends none, and treating "none" as "revoked" logs the end user
+// out on the first refresh.
+//
+// `scopes` narrows the grant; an empty list keeps the original, which
+// is what § 6 specifies.  Widening is refused by the server, not here.
+//
+// ```novo
+// use civil
+// use oauthflow
+// use oauthmsg
+// use oauthtoken
+//
+// fn main() [io, net, async]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//             let t = oauthtoken.with_refresh(oauthtoken.token("a"), "r")
+//             match oauthflow.refresh("https://id.example/token", c, t, [], now)
+//                 Ok(t2) => println(t2.access_token)
+//                 Err(_) => println("the refresh failed")
+// ```
+pub fn refresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthToken, scopes: [Str],
+               arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.refresh")
+
+// The token, refreshed only if it needs it.
+//
+// What a caller holding a token across a long-running program wants,
+// and the reason it is published rather than left to the caller: the
+// three-line version everybody writes reads the expiry, refreshes,
+// and forgets that a token with NO expiry must not be refreshed on
+// every call.
+//
+// Answers the original token unchanged where it is still good.
+//
+// ```novo
+// use civil
+// use oauthflow
+// use oauthmsg
+// use oauthtoken
+//
+// fn main() [io, net, async]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let now = civil.datetime(d, civil.midnight())
+//             let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//             let t = oauthtoken.with_refresh(oauthtoken.token("a"), "r")
+//             match oauthflow.ensure_fresh("https://id.example/token", c, t, now, 30)
+//                 Ok(t2) => println(t2.access_token)
+//                 Err(_) => println("the refresh failed")
+// ```
+pub fn ensure_fresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthToken,
+                    now: civil.CivilDateTime,
+                    leeway_secs: Int) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.ensure_fresh")
+
+// ── Revocation and introspection ─────────────────────────────────────
+
+// Revoke a token (RFC 7009 § 2.1).
+//
+// Answers `None` on success, which includes the case where the token
+// was already invalid — § 2.2 says a server answers 200 for an unknown
+// token on purpose, so that revocation is idempotent and so that a
+// caller cannot use this endpoint to find out whether a token exists.
+//
+// The hint is `access_token` or `refresh_token`, or empty; it is a
+// hint and a server may ignore it.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     match oauthflow.revoke("https://id.example/revoke", c, "tok", "refresh_token")
+//         Some(_) => println("the revocation failed")
+//         None    => println("revoked")
+// ```
+pub fn revoke(endpoint: Str, c: oauthmsg.OauthClient, token: Str,
+              type_hint: Str) -> ?oautherr.OauthFault [net, async]
+    todo("oauth2-nv.oauthflow.revoke")
+
+// Introspect a token (RFC 7662 § 2), as the raw JSON document.
+//
+// Raw rather than a typed value on purpose: introspection is what a
+// RESOURCE server calls, the response's members beyond `active` are
+// whatever the deployment put there, and a typed struct would be a
+// guess about somebody else's schema.  `active` is the one member § 2.2
+// makes required, and `is_active` reads it.
+//
+// This is the one call in the package a resource server makes rather
+// than a client, and it is here because it authenticates the same way.
+//
+// ```novo
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io, net, async]
+//     let c = oauthmsg.with_secret(oauthmsg.client("rs", ""), "s", oauthmsg.OauthAuthBasic)
+//     match oauthflow.introspect("https://id.example/introspect", c, "tok", "")
+//         Ok(doc) => println("${oauthflow.is_active(doc)}")
+//         Err(_)  => println("the introspection failed")
+// ```
+pub fn introspect(endpoint: Str, c: oauthmsg.OauthClient, token: Str,
+                  type_hint: Str) -> Result<Str, oautherr.OauthFault> [net, async]
+    todo("oauth2-nv.oauthflow.introspect")
+
+// The `active` member of an introspection response.
+//
+// `false` for a document that does not carry one, which is RFC 7662
+// § 2.2's fail-closed reading: a response a resource server cannot
+// read is not an authorization.
+//
+// ```novo
+// use oauthflow
+//
+// fn main() [io]
+//     println("${oauthflow.is_active("{}")}")
+// ```
+pub fn is_active(introspection_json: Str) -> Bool []
+    todo("oauth2-nv.oauthflow.is_active")

@@ -1,0 +1,905 @@
+// oauthmsg.nv — every OAuth 2 message this client sends or reads, as
+// arithmetic over strings.  Nothing here performs anything.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE LOAD-BEARING TYPE IS `OauthPending`, and the argument for it is
+// what goes wrong in OAuth clients.  Three values have to survive the
+// round trip through the end user's browser and come back to the same
+// code: the `state`, the PKCE `code_verifier`, and — for OpenID
+// Connect — the `nonce`.  Every one of them is a check the client
+// performs on ITSELF, which means every one of them is a check the
+// client can skip, and skipping the first is a login CSRF: an attacker
+// sends a victim a callback URL carrying the attacker's authorization
+// code, and the victim's browser ends up signed in to the attacker's
+// account, with the victim's subsequent uploads going there.
+//
+// So `OauthPending` holds all three, and `oauthflow.exchange_code`
+// TAKES ONE.  There is no signature in this package that exchanges a
+// code without it, which is what turns "remember to check the state"
+// from a paragraph in a README into an argument the compiler asks for.
+// `check_state` is published beside it so a caller can do the check
+// early, but the exchange does it again: the cheap check is not the
+// one that has to be trusted.
+//
+// `OauthCallback` IS AN ENUM FOR THE SAME REASON.  A redirect back
+// from an authorization endpoint carries `code` and `state`, OR
+// `error` and `state`, and the second case is ordinary — it is the
+// person pressing Cancel.  A library that answered `?Str` for the code
+// would make "the user declined" and "the server sent nonsense" the
+// same `None`, and the handler that gets that `None` has a 500 to
+// write and no idea whether it deserves one.
+//
+// WHAT IS OUT, and why.  This is a CLIENT, so the authorization
+// endpoint, the token endpoint, consent, and every server-side store
+// are out — those are a different package and the grid has no row for
+// one yet.  The implicit grant (`response_type=token`) and the hybrid
+// flows are out because OAuth 2.1 removes them and every current
+// security BCP says not to use them; a client that wants one is
+// telling this library to do something unsafe.  The resource-owner
+// password grant is out on the same authority.  From `oauth2` (the
+// Rust crate) that leaves out `ResourceOwnerPasswordCredentials` and
+// the implicit-flow builders; from `authlib` it leaves out the whole
+// `authlib.oauth2.rfc6749.grants` server side, the JOSE toolkit
+// (jwt-nv's), OAuth 1.0a, and the Django and Flask integrations.
+// Token exchange (RFC 8693) and JWT client assertions (RFC 7523) are
+// reachable: the first through `extra` parameters, the second through
+// `OauthAuthAssertion`, which takes an assertion the caller signed
+// with jwt-nv rather than holding a private key here.
+
+use civil
+use formurl
+use oautherr
+use oauthtoken
+
+// How this client proves who it is at the token endpoint
+// (RFC 6749 § 2.3, RFC 7523 § 2.2).
+pub enum OauthClientAuth
+    // `client_secret_basic`: the credentials in an `Authorization:
+    // Basic` header.  RFC 6749 § 2.3.1 says a server MUST support this
+    // one, so it is the default — and the header is built over the
+    // form-urlencoded client id and secret, which is the step half the
+    // implementations in the world skip and which matters the moment a
+    // secret contains a `+` or a `%`.
+    OauthAuthBasic
+    // `client_secret_post`: the credentials as body parameters.  Some
+    // servers accept only this; a few accept only Basic; a caller who
+    // gets a persistent `invalid_client` against a server that is
+    // definitely configured should try the other one.
+    OauthAuthPost
+    // A public client: no secret at all.  The correct setting for a
+    // native application, a single-page application, and a CLI —
+    // none of which can keep a secret — and the reason PKCE is not
+    // optional in this package.
+    OauthAuthNone
+    // RFC 7523 § 2.2: a signed assertion instead of a secret.  The
+    // assertion arrives already signed, because signing it needs a
+    // private key and jwt-nv is where keys live; this package would
+    // otherwise be holding a signing key it has no other use for.
+    // `assertion_type` is the `client_assertion_type` URN.
+    OauthAuthAssertion(assertion_type: Str, assertion: Str)
+
+// RFC 7636 § 4.2 — how the PKCE challenge is derived from the
+// verifier.
+pub enum OauthPkceMethod
+    // `S256`: `BASE64URL(SHA256(ASCII(verifier)))`.  The one to use.
+    OauthPkceS256
+    // `plain`: the challenge IS the verifier.  RFC 7636 § 4.2 permits
+    // it only where the client cannot compute SHA-256, which is not
+    // this client; it is here so a server that offers nothing else can
+    // be talked to, and `oauthmsg.pkce_is_weak` says so.
+    OauthPkcePlain
+
+// The client's own configuration: who it is, where it is called back,
+// and what it asks for.
+pub struct OauthClient
+    // The `client_id` the authorization server issued.
+    client_id: Str
+    // The secret, empty for a public client.
+    client_secret: Str
+    // How the secret is presented.
+    auth: OauthClientAuth
+    // The `redirect_uri` registered with the server.  Sent on both the
+    // authorization request and the code exchange, because RFC 6749
+    // § 4.1.3 requires the second to repeat the first.
+    redirect_uri: Str
+    // The scopes this client asks for, space-joined on the wire.
+    scopes: [Str]
+    // The PKCE method to use.  `S256` unless a server refuses it.
+    pkce: OauthPkceMethod
+
+// The three values that have to survive the round trip through the
+// end user's browser — and the reason this type exists.
+//
+// Minted by `oauthflow.begin` and REQUIRED by
+// `oauthflow.exchange_code`, so a client cannot exchange a code
+// without the state it sent.  Store it between the two requests: a
+// session (session-nv), a signed cookie (cookie-nv), or a table keyed
+// by `state`.  It holds a secret — the verifier — so it is stored the
+// way a secret is.
+pub struct OauthPending
+    // The CSRF token, echoed by the authorization server in the
+    // callback and compared here.  RFC 6749 § 10.12.
+    state: Str
+    // The OpenID Connect replay token, echoed in the id_token's
+    // `nonce` claim.  Empty for a plain OAuth 2 flow.
+    nonce: Str
+    // The PKCE verifier, RFC 7636 § 4.1: 43 to 128 unreserved
+    // characters.  The authorization request carried its hash; the
+    // token request carries this.  A SECRET.
+    verifier: Str
+    // The redirect URI this flow sent, repeated on the exchange.
+    redirect_uri: Str
+    // The scopes this flow asked for, for comparing against what was
+    // granted.
+    scopes: [Str]
+    // The issuer this flow was started against, checked against the
+    // `iss` the callback carries (RFC 9207) and against the id_token's.
+    issuer: Str
+    // When the flow started, so a caller can expire a pending flow
+    // rather than keeping one forever.
+    started_at: ?civil.CivilDateTime
+
+// What came back to the redirect URI.
+//
+// Three answers and not a `?Str`, because the middle one is ordinary
+// and the third one is not.
+pub enum OauthCallback
+    // An authorization code, and the state it came with.  The state is
+    // NOT checked yet — `check_state` or `oauthflow.exchange_code`
+    // does that, against the `OauthPending` the caller kept.
+    OauthCallbackCode(code: Str, state: Str, issuer: Str)
+    // The authorization server refused, in the form RFC 6749 § 4.1.2.1
+    // specifies.  `access_denied` here is the end user pressing
+    // Cancel, which is not a failure of anything and should not
+    // produce a 500.
+    OauthCallbackRefused(code: Str, description: Str, uri: Str, state: Str)
+    // A query that is neither: no `code`, no `error`, or two `code`
+    // parameters.  The detail names which.
+    OauthCallbackUnreadable(detail: Str)
+
+// A device authorization response (RFC 8628 § 3.2).
+pub struct OauthDeviceGrant
+    // The code this client polls with.  A SECRET — it is the
+    // credential that becomes an access token.
+    device_code: Str
+    // The code the END USER types at the verification page.  Shown to
+    // a person, so it is short and case-insensitive by convention.
+    user_code: Str
+    // Where the end user goes.
+    verification_uri: Str
+    // The same address with the user code already in it, for a client
+    // that can show a QR code or open a browser.  Empty where the
+    // server did not send one — and a client must still show
+    // `verification_uri` and `user_code`, because § 3.3.1 says the
+    // complete form is a convenience and not a replacement.
+    verification_uri_complete: Str
+    // How long the device code lives, in seconds.
+    expires_in: Int
+    // The minimum seconds between polls.  Five where the server did
+    // not say, which is § 3.5's default.
+    interval: Int
+
+// A client configured for the ordinary case: a public client with
+// PKCE, no secret.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("my-cli", "http://127.0.0.1:8765/callback")
+//     println(c.client_id)
+// ```
+pub fn client(client_id: Str, redirect_uri: Str) -> OauthClient []
+    todo("oauth2-nv.oauthmsg.client")
+
+// The same client with a secret and a way to present it.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("web-app", "https://app.example/callback")
+//     let c2 = oauthmsg.with_secret(c, "s3cret", oauthmsg.OauthAuthBasic)
+//     println("${oauthmsg.is_confidential(c2)}")
+// ```
+pub fn with_secret(c: OauthClient, secret: Str, how: OauthClientAuth) -> OauthClient []
+    todo("oauth2-nv.oauthmsg.with_secret")
+
+// The scopes this client asks for.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.with_scopes(oauthmsg.client("a", "b"), ["openid", "email"])
+//     println("${list.len(c.scopes)}")
+// ```
+pub fn with_scopes(c: OauthClient, scopes: [Str]) -> OauthClient []
+    todo("oauth2-nv.oauthmsg.with_scopes")
+
+// The PKCE method, for the server that refuses `S256`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.with_pkce(oauthmsg.client("a", "b"), oauthmsg.OauthPkcePlain)
+//     println("${oauthmsg.pkce_is_weak(c.pkce)}")
+// ```
+pub fn with_pkce(c: OauthClient, method: OauthPkceMethod) -> OauthClient []
+    todo("oauth2-nv.oauthmsg.with_pkce")
+
+// Whether this client holds a secret.
+//
+// The question that decides whether a refresh token may be stored on
+// the end user's machine, and the one a review asks first.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.is_confidential(oauthmsg.client("a", "b"))}")
+// ```
+pub fn is_confidential(c: OauthClient) -> Bool []
+    todo("oauth2-nv.oauthmsg.is_confidential")
+
+// Whether a PKCE method is the one RFC 7636 § 4.2 permits only as a
+// fallback.
+//
+// `plain` puts the verifier in the authorization request, so anything
+// that can read the request — a browser's history, a mobile operating
+// system's URL handler registry, a proxy log — has the value the token
+// request will present.  True for `plain`, false for `S256`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.pkce_is_weak(oauthmsg.OauthPkceS256)}")
+// ```
+pub fn pkce_is_weak(m: OauthPkceMethod) -> Bool []
+    todo("oauth2-nv.oauthmsg.pkce_is_weak")
+
+// The wire name of a PKCE method: `S256` or `plain`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println(oauthmsg.pkce_method_name(oauthmsg.OauthPkceS256))
+// ```
+pub fn pkce_method_name(m: OauthPkceMethod) -> Str []
+    todo("oauth2-nv.oauthmsg.pkce_method_name")
+
+// ── Scopes ───────────────────────────────────────────────────────────
+
+// A scope list as the single space-delimited string the wire carries
+// (RFC 6749 § 3.3).
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println(oauthmsg.scope_join(["openid", "email"]))
+// ```
+pub fn scope_join(scopes: [Str]) -> Str []
+    todo("oauth2-nv.oauthmsg.scope_join")
+
+// A space-delimited scope string as a list.
+//
+// Splits on runs of spaces and drops empties, because a server that
+// sends `"openid  email "` sent two scopes.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${list.len(oauthmsg.scope_split("openid email"))}")
+// ```
+pub fn scope_split(scope: Str) -> [Str] []
+    todo("oauth2-nv.oauthmsg.scope_split")
+
+// Whether every wanted scope is in the granted string.
+//
+// An EMPTY granted string means "what you asked for" and answers true,
+// which is RFC 6749 § 5.1's reading: the `scope` member is required
+// only when the grant differs from the request.  That asymmetry is why
+// this is a function rather than a list comparison every caller writes.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.scope_covers("openid email", ["email"])}")
+// ```
+pub fn scope_covers(granted: Str, wanted: [Str]) -> Bool []
+    todo("oauth2-nv.oauthmsg.scope_covers")
+
+// Whether a scope string is one a server will read: no control
+// characters, no bytes outside RFC 6749 § 3.3's `scope-token`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.scope_ok("openid email")}")
+// ```
+pub fn scope_ok(scope: Str) -> Bool []
+    todo("oauth2-nv.oauthmsg.scope_ok")
+
+// ── PKCE ─────────────────────────────────────────────────────────────
+
+// The number of random BYTES a verifier is minted from.
+//
+// Thirty-two, which base64url-encodes to the 43 characters RFC 7636
+// § 4.1 sets as the minimum and which § 7.1 says is the entropy to
+// aim for.  Published so a test can assert the length rather than
+// trusting a sentence.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.verifier_bytes()}")
+// ```
+pub fn verifier_bytes() -> Int []
+    todo("oauth2-nv.oauthmsg.verifier_bytes")
+
+// The number of random bytes a `state` or a `nonce` is minted from.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.state_bytes()}")
+// ```
+pub fn state_bytes() -> Int []
+    todo("oauth2-nv.oauthmsg.state_bytes")
+
+// A verifier from random bytes: base64url without padding, which is
+// inside RFC 7636 § 4.1's `unreserved` alphabet by construction.
+//
+// The step that a hand-written client gets wrong by using standard
+// base64, whose `+` and `/` are not `unreserved` and are re-encoded by
+// the URL builder, so the verifier presented at the token endpoint is
+// not the one the challenge was computed from.
+//
+// ```novo
+// use std.bytes
+// use oauthmsg
+//
+// fn main() [io]
+//     println(oauthmsg.verifier_of(bytes.from_byte_list([1, 2, 3])))
+// ```
+pub fn verifier_of(raw: Bytes) -> Str []
+    todo("oauth2-nv.oauthmsg.verifier_of")
+
+// Whether a verifier is one RFC 7636 § 4.1 allows: 43 to 128
+// characters, each of `[A-Za-z0-9-._~]`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.verifier_ok("tooshort")}")
+// ```
+pub fn verifier_ok(verifier: Str) -> Bool []
+    todo("oauth2-nv.oauthmsg.verifier_ok")
+
+// The `code_challenge` for a verifier under a method (RFC 7636 § 4.2).
+//
+// `S256` is `BASE64URL-ENCODE(SHA256(ASCII(verifier)))` with no
+// padding; `plain` is the verifier itself.  Refuses a verifier outside
+// § 4.1's grammar, because a challenge computed from one the server
+// will reject is a flow that fails at the exchange with
+// `invalid_grant` and no clue why.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     match oauthmsg.pkce_challenge("x", oauthmsg.OauthPkceS256)
+//         Ok(ch) => println(ch)
+//         Err(_) => println("not a verifier")
+// ```
+pub fn pkce_challenge(verifier: Str, method: OauthPkceMethod) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthmsg.pkce_challenge")
+
+// Whether a verifier and a challenge are a pair under a method.
+//
+// What an authorization SERVER would check.  Here for a test: a client
+// that can assert its own pair is a client whose PKCE is tested
+// without a server.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.pkce_matches("v", "c", oauthmsg.OauthPkceS256)}")
+// ```
+pub fn pkce_matches(verifier: Str, challenge: Str, method: OauthPkceMethod) -> Bool []
+    todo("oauth2-nv.oauthmsg.pkce_matches")
+
+// ── The pending flow ─────────────────────────────────────────────────
+
+// An `OauthPending` from values the caller already has.
+//
+// The testable twin of `oauthflow.begin`: the same value with the
+// randomness supplied rather than minted, so an authorization URL is
+// asserted against a fixed string.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let p = oauthmsg.pending(c, "st", "no", "verifier-goes-here")
+//     println(p.state)
+// ```
+pub fn pending(c: OauthClient, state: Str, nonce: Str, verifier: Str) -> OauthPending []
+    todo("oauth2-nv.oauthmsg.pending")
+
+// The issuer a pending flow belongs to, for the `iss` checks.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let p = oauthmsg.with_issuer(oauthmsg.pending(c, "s", "", "v"), "https://id.example")
+//     println(p.issuer)
+// ```
+pub fn with_issuer(p: OauthPending, issuer: Str) -> OauthPending []
+    todo("oauth2-nv.oauthmsg.with_issuer")
+
+// When the flow started, so a caller can expire it.
+//
+// ```novo
+// use civil
+// use oauthmsg
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//             let p = oauthmsg.pending(c, "s", "", "v")
+//             let at = civil.datetime(d, civil.midnight())
+//             println("${oauthmsg.pending_age(oauthmsg.started_at(p, at), at) ?? 0 - 1}")
+// ```
+pub fn started_at(p: OauthPending, at: civil.CivilDateTime) -> OauthPending []
+    todo("oauth2-nv.oauthmsg.started_at")
+
+// The seconds since the flow started, or `None` where it was never
+// dated.
+//
+// A pending flow is a row in a table somewhere, and a table nobody
+// prunes is a table that fills up.  Ten minutes is the conventional
+// ceiling: an authorization code lives five (RFC 6749 § 4.1.2), so a
+// pending flow older than that cannot be completed anyway.
+//
+// ```novo
+// use civil
+// use oauthmsg
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//             let at = civil.datetime(d, civil.midnight())
+//             match oauthmsg.pending_age(oauthmsg.pending(c, "s", "", "v"), at)
+//                 Some(n) => println("${n}")
+//                 None    => println("undated")
+// ```
+pub fn pending_age(p: OauthPending, now: civil.CivilDateTime) -> ?Int []
+    todo("oauth2-nv.oauthmsg.pending_age")
+
+// A pending flow with its verifier replaced by its length, for a log.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     println(oauthmsg.pending_redacted(oauthmsg.pending(c, "s", "", "v")))
+// ```
+pub fn pending_redacted(p: OauthPending) -> Str []
+    todo("oauth2-nv.oauthmsg.pending_redacted")
+
+// ── The authorization request ────────────────────────────────────────
+
+// Every parameter of the authorization request (RFC 6749 § 4.1.1 plus
+// RFC 7636 § 4.3), in the order the specification lists them.
+//
+// `extra` is appended and may not repeat a name this function already
+// emitted — a duplicate `state` is how a client is talked into
+// checking the wrong one, so the refusal is not politeness.  The
+// refusal is `authorize_url`'s; this function answers the list and the
+// URL builder validates it.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let p = oauthmsg.pending(c, "st", "", "verifier")
+//     println("${list.len(oauthmsg.authorize_params(c, p, []))}")
+// ```
+pub fn authorize_params(c: OauthClient, p: OauthPending, extra: [(Str, Str)]) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.authorize_params")
+
+// The address to send the end user to.
+//
+// The endpoint with the authorization parameters as its query, joined
+// per RFC 3986 § 5.3 so an endpoint that already carries a query keeps
+// it.  Refuses:
+//
+//   · an endpoint that is not `https`, unless the host is a loopback
+//     address — `http://127.0.0.1` is the only shape RFC 8252 § 8.3
+//     blesses, and it is what a native application's redirect uses;
+//   · an `extra` parameter repeating one this request already sends;
+//   · a client with an empty `client_id` or `redirect_uri`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let p = oauthmsg.pending(c, "st", "", "verifier")
+//     match oauthmsg.authorize_url("https://id.example/authorize", c, p, [])
+//         Ok(u)  => println(u)
+//         Err(_) => println("refused")
+// ```
+pub fn authorize_url(endpoint: Str, c: OauthClient, p: OauthPending,
+                     extra: [(Str, Str)]) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthmsg.authorize_url")
+
+// Whether a URL may carry an OAuth exchange: `https`, or `http` to a
+// loopback host.
+//
+// RFC 8252 § 8.3's exception, stated once so the three places that
+// need it agree.  A loopback redirect is how a CLI receives a callback
+// without a public address; anything else over `http` puts a
+// credential in a log.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println("${oauthmsg.endpoint_ok("http://127.0.0.1:8765/cb")}")
+// ```
+pub fn endpoint_ok(url: Str) -> Bool []
+    todo("oauth2-nv.oauthmsg.endpoint_ok")
+
+// ── The callback ─────────────────────────────────────────────────────
+
+// The redirect's query string, read.
+//
+// Takes the RAW query — no leading `?` — because that is what
+// `HttpRequest.query` carries and what a CLI's loopback listener
+// parses out of a request line.  `formurl.parse_str` is what reads it,
+// so a repeated parameter is SEEN: a query with two `state` values
+// becomes `OauthCallbackUnreadable` rather than silently answering the
+// first, which is the value an attacker would like checked.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     match oauthmsg.read_callback("code=abc&state=st")
+//         OauthCallbackCode(c, s, i)          => println(c)
+//         OauthCallbackRefused(e, d, u, s)    => println(e)
+//         OauthCallbackUnreadable(detail)     => println(detail)
+// ```
+pub fn read_callback(query: Str) -> OauthCallback []
+    todo("oauth2-nv.oauthmsg.read_callback")
+
+// The same, from an already-parsed form body.
+//
+// For the caller who parsed the query for another reason, and for the
+// `form_post` response mode, where the parameters arrive in a POST
+// body rather than a query.
+//
+// ```novo
+// use formurl
+// use oauthmsg
+//
+// fn main() [io]
+//     match oauthmsg.read_callback_body(formurl.parse_str("error=access_denied"))
+//         OauthCallbackCode(c, s, i)       => println(c)
+//         OauthCallbackRefused(e, d, u, s) => println(e)
+//         OauthCallbackUnreadable(detail)  => println(detail)
+// ```
+pub fn read_callback_body(b: formurl.FormBody) -> OauthCallback []
+    todo("oauth2-nv.oauthmsg.read_callback_body")
+
+// The state a callback carried, whichever kind it is.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println(oauthmsg.callback_state(oauthmsg.read_callback("code=a&state=b")))
+// ```
+pub fn callback_state(cb: OauthCallback) -> Str []
+    todo("oauth2-nv.oauthmsg.callback_state")
+
+// The authorization code, having checked the state against the
+// pending flow.
+//
+// Compares in constant time, because the comparison is against a value
+// an attacker supplies and a timing oracle on it is a `state` an
+// attacker can guess one byte at a time.  Also checks the `iss` the
+// callback carried against the pending flow's, where both are present
+// — RFC 9207, which is what stops a mix-up attack between two
+// authorization servers a client talks to.
+//
+// A refused callback comes back as the server's own fault, so a caller
+// that matched on `OauthCallbackRefused` already and a caller that
+// went straight here get the same answer.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let p = oauthmsg.pending(c, "st", "", "verifier")
+//     match oauthmsg.check_state(p, oauthmsg.read_callback("code=a&state=st"))
+//         Ok(code) => println(code)
+//         Err(_)   => println("not this flow")
+// ```
+pub fn check_state(p: OauthPending, cb: OauthCallback) -> Result<Str, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthmsg.check_state")
+
+// ── The token request ────────────────────────────────────────────────
+
+// The body parameters of an authorization-code exchange
+// (RFC 6749 § 4.1.3 plus RFC 7636 § 4.5).
+//
+// Carries `redirect_uri` because § 4.1.3 requires it to repeat the
+// authorization request's, and `code_verifier` because the exchange is
+// what proves this client started the flow.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     let p = oauthmsg.pending(c, "st", "", "verifier")
+//     println("${list.len(oauthmsg.code_params(c, p, "the-code"))}")
+// ```
+pub fn code_params(c: OauthClient, p: OauthPending, code: Str) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.code_params")
+
+// The body parameters of a client-credentials request
+// (RFC 6749 § 4.4.2).
+//
+// No `redirect_uri` and no user: this grant is one program asking for
+// a token in its own name.  A public client cannot use it — there is
+// nothing to authenticate with — and `oauthflow.client_credentials`
+// refuses that combination rather than sending a request that will
+// come back `invalid_client`.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("svc", "")
+//     println("${list.len(oauthmsg.client_credentials_params(c, ["api"]))}")
+// ```
+pub fn client_credentials_params(c: OauthClient, scopes: [Str]) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.client_credentials_params")
+
+// The body parameters of a device authorization request
+// (RFC 8628 § 3.1).
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("tv", "")
+//     println("${list.len(oauthmsg.device_params(c, ["openid"]))}")
+// ```
+pub fn device_params(c: OauthClient, scopes: [Str]) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.device_params")
+
+// The body parameters of a device token poll (RFC 8628 § 3.4).
+//
+// The grant type is the URN `urn:ietf:params:oauth:grant-type:device_code`
+// and not `device_code`, which is the mistake that produces
+// `unsupported_grant_type` against a correct server.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("tv", "")
+//     println("${list.len(oauthmsg.device_token_params(c, "dev-code"))}")
+// ```
+pub fn device_token_params(c: OauthClient, device_code: Str) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.device_token_params")
+
+// The body parameters of a refresh (RFC 6749 § 6).
+//
+// `scope` is sent only where the caller narrows it, because § 6 says
+// an omitted scope means the original grant and an explicit one may
+// not widen it.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     println("${list.len(oauthmsg.refresh_params(c, "r-token", []))}")
+// ```
+pub fn refresh_params(c: OauthClient, refresh_token: Str, scopes: [Str]) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.refresh_params")
+
+// The body parameters of a revocation (RFC 7009 § 2.1).
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     println("${list.len(oauthmsg.revoke_params(c, "tok", "refresh_token"))}")
+// ```
+pub fn revoke_params(c: OauthClient, token: Str, type_hint: Str) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.revoke_params")
+
+// The body parameters of an introspection (RFC 7662 § 2.1).
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("rs", "")
+//     println("${list.len(oauthmsg.introspect_params(c, "tok", ""))}")
+// ```
+pub fn introspect_params(c: OauthClient, token: Str, type_hint: Str) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.introspect_params")
+
+// The client's credentials added to a parameter list, where the client
+// presents them in the body.
+//
+// A no-op for `OauthAuthBasic` (they go in a header) and for
+// `OauthAuthNone` — except that a public client still sends
+// `client_id`, which RFC 6749 § 4.1.3 requires and which is the
+// parameter a public client is identified by.
+//
+// ```novo
+// use std.list
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     println("${list.len(oauthmsg.with_client_auth(c, []))}")
+// ```
+pub fn with_client_auth(c: OauthClient, params: [(Str, Str)]) -> [(Str, Str)] []
+    todo("oauth2-nv.oauthmsg.with_client_auth")
+
+// The `Authorization` header for a client that presents its
+// credentials there, or `None` for one that does not.
+//
+// RFC 6749 § 2.3.1 in full: the id and the secret are
+// `application/x-www-form-urlencoded` FIRST and base64 second.  Half
+// the clients in the world skip the encoding, which works until a
+// secret contains a character the encoding changes — and then produces
+// an `invalid_client` that looks like a wrong secret.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.with_secret(oauthmsg.client("a", "b"), "s", oauthmsg.OauthAuthBasic)
+//     match oauthmsg.auth_header(c)
+//         Some(h) => println(h)
+//         None    => println("in the body instead")
+// ```
+pub fn auth_header(c: OauthClient) -> ?Str []
+    todo("oauth2-nv.oauthmsg.auth_header")
+
+// A parameter list as an `application/x-www-form-urlencoded` body.
+//
+// `formurl.serialise`, named here so every caller encodes the same way
+// and so a test can assert the exact bytes a request would carry.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println(oauthmsg.encode_body([("grant_type", "refresh_token")]))
+// ```
+pub fn encode_body(params: [(Str, Str)]) -> Str []
+    todo("oauth2-nv.oauthmsg.encode_body")
+
+// ── Reading what came back ───────────────────────────────────────────
+
+// A token endpoint's 200 response (RFC 6749 § 5.1).
+//
+// `arrived_at` is what `expires_in` is counted from — see
+// `oauthtoken`'s note on which direction the arithmetic errs.  Refuses
+// a body that is not a JSON object, one with no `access_token`, and
+// one with no `token_type`: § 5.1 makes both REQUIRED, and a client
+// that defaults the type to `Bearer` is a client that sends a bearer
+// header for a token that is not one.
+//
+// ```novo
+// use civil
+// use oauthmsg
+//
+// fn main() [io]
+//     match civil.date(2026, 9, 11)
+//         Err(_) => println("no")
+//         Ok(d)  =>
+//             let at = civil.datetime(d, civil.midnight())
+//             match oauthmsg.read_token_response("{}", at)
+//                 Ok(t)  => println(t.access_token)
+//                 Err(_) => println("not a token response")
+// ```
+pub fn read_token_response(body: Str,
+                           arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthmsg.read_token_response")
+
+// A token endpoint's error response (RFC 6749 § 5.2), as a fault.
+//
+// Takes the status as well as the body, because a 500 with an HTML
+// body is a real answer that carries no `error` member, and folding
+// it into `OauthMalformedResponse` loses the fact that retrying might
+// work.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     println(oauthmsg.fault_of(400, "{\"error\":\"invalid_grant\"}"))
+// ```
+pub fn fault_of(status: Int, body: Str) -> oautherr.OauthFault []
+    todo("oauth2-nv.oauthmsg.fault_of")
+
+// A device authorization response (RFC 8628 § 3.2).
+//
+// Defaults `interval` to five where the server omitted it, which is
+// what § 3.5 specifies; refuses a body with no `device_code`,
+// `user_code` or `verification_uri`.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     match oauthmsg.read_device_response("{}")
+//         Ok(g)  => println(g.user_code)
+//         Err(_) => println("not a device response")
+// ```
+pub fn read_device_response(body: Str) -> Result<OauthDeviceGrant, oautherr.OauthFault> []
+    todo("oauth2-nv.oauthmsg.read_device_response")
+
+// The text to put in front of an end user for a device flow.
+//
+// One line, the specification's own wording: the address and the code.
+// Published because a device flow whose two values are shown apart is
+// one people mistype, and because § 3.3 says both must be shown even
+// when `verification_uri_complete` is available.
+//
+// ```novo
+// use oauthmsg
+//
+// fn main() [io]
+//     match oauthmsg.read_device_response("{}")
+//         Err(_) => println("no")
+//         Ok(g)  => println(oauthmsg.device_prompt(g))
+// ```
+pub fn device_prompt(g: OauthDeviceGrant) -> Str []
+    todo("oauth2-nv.oauthmsg.device_prompt")

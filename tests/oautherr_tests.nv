@@ -1,0 +1,160 @@
+// oautherr_tests.nv — the four questions a caller has about a fault.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: oauth2-nv.oautherr.<fn>`.
+//
+// The codes are RFC 6749 § 5.2's six, § 4.1.2.1's three and RFC 8628
+// § 3.5's four.  The predicates are the point: a client that branches
+// on the code STRING gets `authorization_pending` wrong, because it is
+// not an error at all in the device flow — it is the expected answer
+// for most of a minute.
+
+use std.test
+use std.list
+use std.str
+use oautherr
+
+@test
+fn test_every_wire_code_round_trips_through_its_name() [io]
+    test.case("§ 5.2's six")
+    test.assert_eq_str(oautherr.fault_code(oautherr.fault_named("invalid_request", "", "")),
+                       "invalid_request")
+    test.assert_eq_str(oautherr.fault_code(oautherr.fault_named("invalid_client", "", "")),
+                       "invalid_client")
+    test.assert_eq_str(oautherr.fault_code(oautherr.fault_named("invalid_grant", "", "")),
+                       "invalid_grant")
+    test.assert_eq_str(oautherr.fault_code(oautherr.fault_named("unauthorized_client", "", "")),
+                       "unauthorized_client")
+    test.assert_eq_str(oautherr.fault_code(oautherr.fault_named("unsupported_grant_type", "", "")),
+                       "unsupported_grant_type")
+    test.assert_eq_str(oautherr.fault_code(oautherr.fault_named("invalid_scope", "", "")),
+                       "invalid_scope")
+
+    test.case("RFC 8628 § 3.5's four")
+    test.assert_eq_str(oautherr.fault_code(oautherr.OauthAuthorizationPending),
+                       "authorization_pending")
+    test.assert_eq_str(oautherr.fault_code(oautherr.OauthSlowDown(5)), "slow_down")
+    test.assert_eq_str(oautherr.fault_code(oautherr.OauthAccessDenied("")), "access_denied")
+    test.assert_eq_str(oautherr.fault_code(oautherr.OauthExpiredToken), "expired_token")
+
+    test.case("and this client's own refusals have no wire code")
+    test.assert_eq_str(oautherr.fault_code(oautherr.OauthNoEntropy), "")
+
+@test
+fn test_an_unknown_code_is_kept_rather_than_folded_into_server_error() [io]
+    test.case("an extension code a deployment invented")
+    match oautherr.fault_named("tenant_suspended", "this tenant is suspended", "")
+        OauthUnknownErrorCode(code, desc) =>
+            test.assert_eq_str(code, "tenant_suspended")
+            test.assert_eq_str(desc, "this tenant is suspended")
+        _                                 => test.assert(false)
+
+@test
+fn test_the_description_and_uri_a_server_sent_are_readable() [io]
+    test.case("both, where the server sent them")
+    let f = oautherr.fault_named("invalid_grant", "code already used",
+                                 "https://id.example/errors/invalid_grant")
+    test.assert_eq_str(oautherr.fault_description(f), "code already used")
+    test.assert_eq_str(oautherr.fault_uri(f), "https://id.example/errors/invalid_grant")
+
+    test.case("and empty on a fault nothing on the wire produced")
+    test.assert_eq_str(oautherr.fault_description(oautherr.OauthNoEntropy), "")
+    test.assert_eq_str(oautherr.fault_uri(oautherr.OauthNoEntropy), "")
+
+@test
+fn test_retrying_invalid_grant_forever_is_what_is_retryable_prevents() [io]
+    test.case("the server had a bad day")
+    test.assert(oautherr.is_retryable(oautherr.fault_named("temporarily_unavailable", "", "")))
+    test.assert(oautherr.is_retryable(oautherr.fault_named("server_error", "", "")))
+    test.assert(oautherr.is_retryable(oautherr.OauthTransport("connection refused")))
+
+    test.case("the server decided something about this grant")
+    test.assert(not oautherr.is_retryable(oautherr.fault_named("invalid_grant", "", "")))
+    test.assert(not oautherr.is_retryable(oautherr.fault_named("invalid_client", "", "")))
+
+    test.case("and the end user decided something")
+    test.assert(not oautherr.is_retryable(oautherr.OauthAccessDenied("")))
+
+@test
+fn test_the_two_device_answers_that_are_not_failures() [io]
+    test.case("pending and slow_down keep the poll going")
+    test.assert(oautherr.is_pending(oautherr.OauthAuthorizationPending))
+    test.assert(oautherr.is_pending(oautherr.OauthSlowDown(5)))
+
+    test.case("and nothing else does — an expired device code is final")
+    test.assert(not oautherr.is_pending(oautherr.OauthExpiredToken))
+    test.assert(not oautherr.is_pending(oautherr.OauthAccessDenied("")))
+    test.assert(not oautherr.is_pending(oautherr.fault_named("invalid_grant", "", "")))
+
+@test
+fn test_slow_down_adds_the_five_seconds_rfc_8628_specifies() [io]
+    test.case("pending keeps the grant's interval")
+    test.assert(oautherr.poll_delay(oautherr.OauthAuthorizationPending, 5) == 5)
+
+    test.case("slow_down adds § 3.5's five")
+    test.assert(oautherr.poll_delay(oautherr.OauthSlowDown(5), 5) == 10)
+
+    test.case("and a final answer polls no more")
+    test.assert(oautherr.poll_delay(oautherr.OauthExpiredToken, 5) == 0)
+
+@test
+fn test_the_two_remaining_questions_a_caller_has() [io]
+    test.case("somebody has to go and do something")
+    test.assert(oautherr.needs_user_action(oautherr.OauthAccessDenied("")))
+    test.assert(oautherr.needs_user_action(oautherr.OauthExpiredToken))
+    test.assert(not oautherr.needs_user_action(oautherr.OauthTransport("")))
+
+    test.case("the deployment is wrong and retrying cannot fix it")
+    test.assert(oautherr.is_configuration_fault(
+        oautherr.fault_named("unsupported_grant_type", "", "")))
+    test.assert(oautherr.is_configuration_fault(
+        oautherr.OauthInsecureEndpoint("http://id.example/token")))
+    test.assert(not oautherr.is_configuration_fault(oautherr.OauthAuthorizationPending))
+
+@test
+fn test_a_servers_free_text_is_not_client_safe() [io]
+    // An `error_description` is a string from another party's server.
+    // It is fine in a log; it does not belong interpolated into a page.
+    test.case("anything carrying a server's description")
+    test.assert(not oautherr.is_client_safe(
+        oautherr.fault_named("invalid_grant", "<script>alert(1)</script>", "")))
+
+    test.case("and the three mismatches, whose values are a log's business")
+    test.assert(not oautherr.is_client_safe(oautherr.OauthStateMismatch("a", "b")))
+    test.assert(not oautherr.is_client_safe(oautherr.OauthNonceMismatch("a", "b")))
+    test.assert(not oautherr.is_client_safe(oautherr.OauthIssuerMismatch("a", "b")))
+
+    test.case("`the sign-in was refused` is safe, because it has no content of anybody's")
+    test.assert(oautherr.is_client_safe(oautherr.OauthExpiredToken))
+
+@test
+fn test_a_gateway_answers_a_browser_something_and_two_handlers_must_agree() [io]
+    test.case("the end user cancelled — not a 500")
+    test.assert(oautherr.status_for(oautherr.OauthAccessDenied("")) == 403)
+
+    test.case("the client is misconfigured — the browser cannot fix that")
+    test.assert(oautherr.status_for(oautherr.fault_named("invalid_client", "", "")) == 500)
+
+    test.case("the upstream is down")
+    test.assert(oautherr.status_for(oautherr.fault_named("temporarily_unavailable", "", ""))
+                == 503)
+
+    test.case("the callback was not this flow's")
+    test.assert(oautherr.status_for(oautherr.OauthStateMismatch("a", "b")) == 400)
+
+@test
+fn test_the_known_codes_list_is_the_contract() [io]
+    test.case("thirteen wire codes across the three RFCs")
+    let codes = oautherr.known_codes()
+    test.assert(list.len(codes) >= 13)
+
+    test.case("and a code in the list is one `fault_named` does not call unknown")
+    match oautherr.fault_named("slow_down", "", "")
+        OauthUnknownErrorCode(_, _) => test.assert(false)
+        _                           => test.assert(true)
+
+@test
+fn test_a_fault_reports_itself_through_the_error_trait() [io]
+    test.case("the message says what happened")
+    let f = oautherr.fault_named("invalid_grant", "code already used", "")
+    test.assert(str.len(f.message()) > 0)
