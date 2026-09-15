@@ -5,6 +5,10 @@ All notable changes to oauth2-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-12
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -59,3 +63,17 @@ The **interface**: every signature and every effect row, and no bodies.
 - No `tests/embedded_probe.nv`, and the absence is a claim not made
   rather than a claim skipped: this is a `host` package, so it makes no
   device claim to check.
+
+### Design notes
+
+Four of the six modules — `oautherr`, `oauthmsg`, `oauthtoken` and
+`oauthoidc` — declare no effects, so a `oauth-codec-nv` split would be
+a file move with no signature change. It is not made, because the
+second consumer that would pay for it is an OAuth authorization server,
+and none exists. A codec whose only consumer is the client beside it is
+a second package a reader has to assemble for nothing.
+
+Left out of the ported surface: from oauth2-rs, the resource owner
+password credentials grant and the implicit-flow builders; from
+Authlib, the whole `authlib.oauth2.rfc6749.grants` server side, the
+JOSE toolkit, OAuth 1.0a, and the Django and Flask integrations.

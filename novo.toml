@@ -1,6 +1,6 @@
 [package]
 name        = "oauth2-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "OAuth 2 and OpenID Connect for a CLIENT: the authorization code flow with PKCE, client credentials, the device code flow and refresh, with the message arithmetic in an effect-free module and one function in the whole package that touches the network.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 
