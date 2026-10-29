@@ -1,8 +1,6 @@
 // oauthmsg.nv — every OAuth 2 message this client sends or reads, as
 // arithmetic over strings.  Nothing here performs anything.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THE LOAD-BEARING TYPE IS `OauthPending`, and the argument for it is
 // what goes wrong in OAuth clients.  Three values have to survive the
 // round trip through the end user's browser and come back to the same
@@ -47,8 +45,15 @@
 // `OauthAuthAssertion`, which takes an assertion the caller signed
 // with jwt-nv rather than holding a private key here.
 
+use std.bytes
+use std.json
+use std.list
+use std.str
+use base64
 use civil
 use formurl
+use hashing
+use href
 use oautherr
 use oauthtoken
 
@@ -191,7 +196,8 @@ pub struct OauthDeviceGrant
 //     println(c.client_id)
 // ```
 pub fn client(client_id: Str, redirect_uri: Str) -> OauthClient []
-    todo("oauth2-nv.oauthmsg.client")
+    OauthClient { client_id: client_id, client_secret: "", auth: OauthAuthNone,
+                  redirect_uri: redirect_uri, scopes: [], pkce: OauthPkceS256 }
 
 // The same client with a secret and a way to present it.
 //
@@ -204,7 +210,8 @@ pub fn client(client_id: Str, redirect_uri: Str) -> OauthClient []
 //     println("${oauthmsg.is_confidential(c2)}")
 // ```
 pub fn with_secret(c: OauthClient, secret: Str, how: OauthClientAuth) -> OauthClient []
-    todo("oauth2-nv.oauthmsg.with_secret")
+    OauthClient { client_id: c.client_id, client_secret: secret, auth: how,
+                  redirect_uri: c.redirect_uri, scopes: c.scopes, pkce: c.pkce }
 
 // The scopes this client asks for.
 //
@@ -217,7 +224,8 @@ pub fn with_secret(c: OauthClient, secret: Str, how: OauthClientAuth) -> OauthCl
 //     println("${list.len(c.scopes)}")
 // ```
 pub fn with_scopes(c: OauthClient, scopes: [Str]) -> OauthClient []
-    todo("oauth2-nv.oauthmsg.with_scopes")
+    OauthClient { client_id: c.client_id, client_secret: c.client_secret, auth: c.auth,
+                  redirect_uri: c.redirect_uri, scopes: scopes, pkce: c.pkce }
 
 // The PKCE method, for the server that refuses `S256`.
 //
@@ -229,7 +237,8 @@ pub fn with_scopes(c: OauthClient, scopes: [Str]) -> OauthClient []
 //     println("${oauthmsg.pkce_is_weak(c.pkce)}")
 // ```
 pub fn with_pkce(c: OauthClient, method: OauthPkceMethod) -> OauthClient []
-    todo("oauth2-nv.oauthmsg.with_pkce")
+    OauthClient { client_id: c.client_id, client_secret: c.client_secret, auth: c.auth,
+                  redirect_uri: c.redirect_uri, scopes: c.scopes, pkce: method }
 
 // Whether this client holds a secret.
 //
@@ -243,7 +252,10 @@ pub fn with_pkce(c: OauthClient, method: OauthPkceMethod) -> OauthClient []
 //     println("${oauthmsg.is_confidential(oauthmsg.client("a", "b"))}")
 // ```
 pub fn is_confidential(c: OauthClient) -> Bool []
-    todo("oauth2-nv.oauthmsg.is_confidential")
+    match c.auth
+        OauthAuthNone            => false
+        OauthAuthAssertion(_, _) => true
+        _                        => c.client_secret != ""
 
 // Whether a PKCE method is the one RFC 7636 § 4.2 permits only as a
 // fallback.
@@ -260,7 +272,9 @@ pub fn is_confidential(c: OauthClient) -> Bool []
 //     println("${oauthmsg.pkce_is_weak(oauthmsg.OauthPkceS256)}")
 // ```
 pub fn pkce_is_weak(m: OauthPkceMethod) -> Bool []
-    todo("oauth2-nv.oauthmsg.pkce_is_weak")
+    match m
+        OauthPkcePlain => true
+        OauthPkceS256  => false
 
 // The wire name of a PKCE method: `S256` or `plain`.
 //
@@ -271,7 +285,9 @@ pub fn pkce_is_weak(m: OauthPkceMethod) -> Bool []
 //     println(oauthmsg.pkce_method_name(oauthmsg.OauthPkceS256))
 // ```
 pub fn pkce_method_name(m: OauthPkceMethod) -> Str []
-    todo("oauth2-nv.oauthmsg.pkce_method_name")
+    match m
+        OauthPkcePlain => "plain"
+        OauthPkceS256  => "S256"
 
 // ── Scopes ───────────────────────────────────────────────────────────
 
@@ -285,7 +301,7 @@ pub fn pkce_method_name(m: OauthPkceMethod) -> Str []
 //     println(oauthmsg.scope_join(["openid", "email"]))
 // ```
 pub fn scope_join(scopes: [Str]) -> Str []
-    todo("oauth2-nv.oauthmsg.scope_join")
+    str.join(scopes, " ")
 
 // A space-delimited scope string as a list.
 //
@@ -300,7 +316,11 @@ pub fn scope_join(scopes: [Str]) -> Str []
 //     println("${list.len(oauthmsg.scope_split("openid email"))}")
 // ```
 pub fn scope_split(scope: Str) -> [Str] []
-    todo("oauth2-nv.oauthmsg.scope_split")
+    var out: [Str] = []
+    for part in str.split(scope, " ")
+        if part != ""
+            out = list.push(out, part)
+    out
 
 // Whether every wanted scope is in the granted string.
 //
@@ -316,7 +336,15 @@ pub fn scope_split(scope: Str) -> [Str] []
 //     println("${oauthmsg.scope_covers("openid email", ["email"])}")
 // ```
 pub fn scope_covers(granted: Str, wanted: [Str]) -> Bool []
-    todo("oauth2-nv.oauthmsg.scope_covers")
+    if granted == ""
+        true
+    else
+        let have = scope_split(granted)
+        var ok = true
+        for w in wanted
+            if not list.contains(have, w)
+                ok = false
+        ok
 
 // Whether a scope string is one a server will read: no control
 // characters, no bytes outside RFC 6749 § 3.3's `scope-token`.
@@ -328,7 +356,25 @@ pub fn scope_covers(granted: Str, wanted: [Str]) -> Bool []
 //     println("${oauthmsg.scope_ok("openid email")}")
 // ```
 pub fn scope_ok(scope: Str) -> Bool []
-    todo("oauth2-nv.oauthmsg.scope_ok")
+    // RFC 6749 § 3.3: scope-token *( SP scope-token ), a token being
+    // 0x21, 0x23-0x5B or 0x5D-0x7E.
+    var ok = scope != ""
+    var prev_space = true
+    var i = 0
+    while i < str.len(scope)
+        let b = str.byte_at_or(scope, i, 0)
+        if b == 32
+            if prev_space
+                ok = false
+            prev_space = true
+        else
+            if b < 33 or b == 34 or b == 92 or b > 126
+                ok = false
+            prev_space = false
+        i = i + 1
+    if prev_space
+        ok = false
+    ok
 
 // ── PKCE ─────────────────────────────────────────────────────────────
 
@@ -346,7 +392,7 @@ pub fn scope_ok(scope: Str) -> Bool []
 //     println("${oauthmsg.verifier_bytes()}")
 // ```
 pub fn verifier_bytes() -> Int []
-    todo("oauth2-nv.oauthmsg.verifier_bytes")
+    32
 
 // The number of random bytes a `state` or a `nonce` is minted from.
 //
@@ -357,7 +403,7 @@ pub fn verifier_bytes() -> Int []
 //     println("${oauthmsg.state_bytes()}")
 // ```
 pub fn state_bytes() -> Int []
-    todo("oauth2-nv.oauthmsg.state_bytes")
+    32
 
 // A verifier from random bytes: base64url without padding, which is
 // inside RFC 7636 § 4.1's `unreserved` alphabet by construction.
@@ -375,7 +421,7 @@ pub fn state_bytes() -> Int []
 //     println(oauthmsg.verifier_of(bytes.from_byte_list([1, 2, 3])))
 // ```
 pub fn verifier_of(raw: Bytes) -> Str []
-    todo("oauth2-nv.oauthmsg.verifier_of")
+    base64.encode(raw, B64UrlSafe, B64Unpadded)
 
 // Whether a verifier is one RFC 7636 § 4.1 allows: 43 to 128
 // characters, each of `[A-Za-z0-9-._~]`.
@@ -387,7 +433,14 @@ pub fn verifier_of(raw: Bytes) -> Str []
 //     println("${oauthmsg.verifier_ok("tooshort")}")
 // ```
 pub fn verifier_ok(verifier: Str) -> Bool []
-    todo("oauth2-nv.oauthmsg.verifier_ok")
+    let n = str.len(verifier)
+    var ok = n >= 43 and n <= 128
+    var i = 0
+    while i < n
+        if not unreserved(str.byte_at_or(verifier, i, 0))
+            ok = false
+        i = i + 1
+    ok
 
 // The `code_challenge` for a verifier under a method (RFC 7636 § 4.2).
 //
@@ -406,7 +459,14 @@ pub fn verifier_ok(verifier: Str) -> Bool []
 //         Err(_) => println("not a verifier")
 // ```
 pub fn pkce_challenge(verifier: Str, method: OauthPkceMethod) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthmsg.pkce_challenge")
+    if not verifier_ok(verifier)
+        Err(oautherr.OauthInvalidRequest("the code_verifier is outside RFC 7636 section 4.1: 43 to 128 characters of A-Z a-z 0-9 - . _ ~",
+            ""))
+    else
+        match method
+            OauthPkcePlain => Ok(verifier)
+            OauthPkceS256  =>
+                Ok(base64.encode(hashing.sha256(bytes.from_str(verifier)), B64UrlSafe, B64Unpadded))
 
 // Whether a verifier and a challenge are a pair under a method.
 //
@@ -421,7 +481,9 @@ pub fn pkce_challenge(verifier: Str, method: OauthPkceMethod) -> Result<Str, oau
 //     println("${oauthmsg.pkce_matches("v", "c", oauthmsg.OauthPkceS256)}")
 // ```
 pub fn pkce_matches(verifier: Str, challenge: Str, method: OauthPkceMethod) -> Bool []
-    todo("oauth2-nv.oauthmsg.pkce_matches")
+    match pkce_challenge(verifier, method)
+        Err(_) => false
+        Ok(ch) => same_text(ch, challenge)
 
 // ── The pending flow ─────────────────────────────────────────────────
 
@@ -440,7 +502,9 @@ pub fn pkce_matches(verifier: Str, challenge: Str, method: OauthPkceMethod) -> B
 //     println(p.state)
 // ```
 pub fn pending(c: OauthClient, state: Str, nonce: Str, verifier: Str) -> OauthPending []
-    todo("oauth2-nv.oauthmsg.pending")
+    OauthPending { state: state, nonce: nonce, verifier: verifier,
+                   redirect_uri: c.redirect_uri, scopes: c.scopes, issuer: "",
+                   started_at: None }
 
 // The issuer a pending flow belongs to, for the `iss` checks.
 //
@@ -453,7 +517,9 @@ pub fn pending(c: OauthClient, state: Str, nonce: Str, verifier: Str) -> OauthPe
 //     println(p.issuer)
 // ```
 pub fn with_issuer(p: OauthPending, issuer: Str) -> OauthPending []
-    todo("oauth2-nv.oauthmsg.with_issuer")
+    OauthPending { state: p.state, nonce: p.nonce, verifier: p.verifier,
+                   redirect_uri: p.redirect_uri, scopes: p.scopes, issuer: issuer,
+                   started_at: p.started_at }
 
 // When the flow started, so a caller can expire it.
 //
@@ -471,7 +537,9 @@ pub fn with_issuer(p: OauthPending, issuer: Str) -> OauthPending []
 //             println("${oauthmsg.pending_age(oauthmsg.started_at(p, at), at) ?? 0 - 1}")
 // ```
 pub fn started_at(p: OauthPending, at: civil.CivilDateTime) -> OauthPending []
-    todo("oauth2-nv.oauthmsg.started_at")
+    OauthPending { state: p.state, nonce: p.nonce, verifier: p.verifier,
+                   redirect_uri: p.redirect_uri, scopes: p.scopes, issuer: p.issuer,
+                   started_at: Some(at) }
 
 // The seconds since the flow started, or `None` where it was never
 // dated.
@@ -496,7 +564,9 @@ pub fn started_at(p: OauthPending, at: civil.CivilDateTime) -> OauthPending []
 //                 None    => println("undated")
 // ```
 pub fn pending_age(p: OauthPending, now: civil.CivilDateTime) -> ?Int []
-    todo("oauth2-nv.oauthmsg.pending_age")
+    match p.started_at
+        None     => None
+        Some(at) => Some(oauthtoken.unix_seconds(now) - oauthtoken.unix_seconds(at))
 
 // A pending flow with its verifier replaced by its length, for a log.
 //
@@ -508,7 +578,10 @@ pub fn pending_age(p: OauthPending, now: civil.CivilDateTime) -> ?Int []
 //     println(oauthmsg.pending_redacted(oauthmsg.pending(c, "s", "", "v")))
 // ```
 pub fn pending_redacted(p: OauthPending) -> Str []
-    todo("oauth2-nv.oauthmsg.pending_redacted")
+    let started = match p.started_at
+        Some(at) => "${at.date.year}-${at.date.month}-${at.date.day}"
+        None     => "undated"
+    "OauthPending(state=${p.state}, nonce=${p.nonce}, verifier=<${str.len(p.verifier)} bytes>, redirect_uri=${p.redirect_uri}, scopes=${scope_join(p.scopes)}, issuer=${p.issuer}, started_at=${started})"
 
 // ── The authorization request ────────────────────────────────────────
 
@@ -531,7 +604,19 @@ pub fn pending_redacted(p: OauthPending) -> Str []
 //     println("${list.len(oauthmsg.authorize_params(c, p, []))}")
 // ```
 pub fn authorize_params(c: OauthClient, p: OauthPending, extra: [(Str, Str)]) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.authorize_params")
+    var out: [(Str, Str)] = [("response_type", "code"), ("client_id", c.client_id),
+                             ("redirect_uri", p.redirect_uri)]
+    if list.len(p.scopes) > 0
+        out = list.push(out, ("scope", scope_join(p.scopes)))
+    out = list.push(out, ("state", p.state))
+    if p.nonce != ""
+        out = list.push(out, ("nonce", p.nonce))
+    match pkce_challenge(p.verifier, c.pkce)
+        Err(_) => ()
+        Ok(ch) =>
+            out = list.push(out, ("code_challenge", ch))
+            out = list.push(out, ("code_challenge_method", pkce_method_name(c.pkce)))
+    list.concat(out, extra)
 
 // The address to send the end user to.
 //
@@ -557,7 +642,20 @@ pub fn authorize_params(c: OauthClient, p: OauthPending, extra: [(Str, Str)]) ->
 // ```
 pub fn authorize_url(endpoint: Str, c: OauthClient, p: OauthPending,
                      extra: [(Str, Str)]) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthmsg.authorize_url")
+    if c.client_id == ""
+        return Err(oautherr.OauthInvalidRequest("the client has an empty client_id", ""))
+    if p.redirect_uri == ""
+        return Err(oautherr.OauthInvalidRequest("the client has an empty redirect_uri", ""))
+    match pkce_challenge(p.verifier, c.pkce)
+        Err(f) => Err(f)
+        Ok(_)  =>
+            let base = authorize_params(c, p, [])
+            for e in extra
+                for b in base
+                    if e.0 == b.0
+                        return Err(oautherr.OauthInvalidRequest("the extra parameter '${e.0}' repeats one the request already sends", ""))
+            let query = formurl.serialise(list.concat(base, extra))
+            with_query(endpoint, query)
 
 // Whether a URL may carry an OAuth exchange: `https`, or `http` to a
 // loopback host.
@@ -574,7 +672,9 @@ pub fn authorize_url(endpoint: Str, c: OauthClient, p: OauthPending,
 //     println("${oauthmsg.endpoint_ok("http://127.0.0.1:8765/cb")}")
 // ```
 pub fn endpoint_ok(url: Str) -> Bool []
-    todo("oauth2-nv.oauthmsg.endpoint_ok")
+    match href.parse_parts(url)
+        Err(_) => false
+        Ok(p)  => parts_ok(p)
 
 // ── The callback ─────────────────────────────────────────────────────
 
@@ -597,7 +697,7 @@ pub fn endpoint_ok(url: Str) -> Bool []
 //         OauthCallbackUnreadable(detail)     => println(detail)
 // ```
 pub fn read_callback(query: Str) -> OauthCallback []
-    todo("oauth2-nv.oauthmsg.read_callback")
+    read_callback_body(formurl.parse_str(query))
 
 // The same, from an already-parsed form body.
 //
@@ -616,7 +716,23 @@ pub fn read_callback(query: Str) -> OauthCallback []
 //         OauthCallbackUnreadable(detail)  => println(detail)
 // ```
 pub fn read_callback_body(b: formurl.FormBody) -> OauthCallback []
-    todo("oauth2-nv.oauthmsg.read_callback_body")
+    var repeated = ""
+    for name in ["code", "state", "error", "error_description", "error_uri", "iss"]
+        if repeated == "" and formurl.count(b, name) > 1
+            repeated = name
+    if repeated != ""
+        OauthCallbackUnreadable("the callback carries '${repeated}' more than once")
+    else if formurl.has(b, "error")
+        if formurl.has(b, "code")
+            OauthCallbackUnreadable("the callback carries both 'code' and 'error'")
+        else
+            OauthCallbackRefused(formurl.get(b, "error") ?? "", formurl.get(b, "error_description") ?? "",
+                                 formurl.get(b, "error_uri") ?? "", formurl.get(b, "state") ?? "")
+    else if formurl.has(b, "code")
+        OauthCallbackCode(formurl.get(b, "code") ?? "", formurl.get(b, "state") ?? "",
+                          formurl.get(b, "iss") ?? "")
+    else
+        OauthCallbackUnreadable("the callback carries neither 'code' nor 'error'")
 
 // The state a callback carried, whichever kind it is.
 //
@@ -627,7 +743,10 @@ pub fn read_callback_body(b: formurl.FormBody) -> OauthCallback []
 //     println(oauthmsg.callback_state(oauthmsg.read_callback("code=a&state=b")))
 // ```
 pub fn callback_state(cb: OauthCallback) -> Str []
-    todo("oauth2-nv.oauthmsg.callback_state")
+    match cb
+        OauthCallbackCode(_, state, _)       => state
+        OauthCallbackRefused(_, _, _, state) => state
+        OauthCallbackUnreadable(_)           => ""
 
 // The authorization code, having checked the state against the
 // pending flow.
@@ -654,7 +773,22 @@ pub fn callback_state(cb: OauthCallback) -> Str []
 //         Err(_)   => println("not this flow")
 // ```
 pub fn check_state(p: OauthPending, cb: OauthCallback) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthmsg.check_state")
+    match cb
+        OauthCallbackUnreadable(detail)                     => Err(oautherr.OauthMalformedResponse(detail))
+        OauthCallbackRefused(code, description, uri, state) =>
+            if not state_ok(p, state)
+                Err(oautherr.OauthStateMismatch(p.state, state))
+            else
+                Err(oautherr.fault_named(code, description, uri))
+        OauthCallbackCode(code, state, iss)                 =>
+            if not state_ok(p, state)
+                Err(oautherr.OauthStateMismatch(p.state, state))
+            else if p.issuer != "" and iss != "" and iss != p.issuer
+                Err(oautherr.OauthIssuerMismatch(p.issuer, iss))
+            else if code == ""
+                Err(oautherr.OauthMissingField("code"))
+            else
+                Ok(code)
 
 // ── The token request ────────────────────────────────────────────────
 
@@ -675,7 +809,8 @@ pub fn check_state(p: OauthPending, cb: OauthCallback) -> Result<Str, oautherr.O
 //     println("${list.len(oauthmsg.code_params(c, p, "the-code"))}")
 // ```
 pub fn code_params(c: OauthClient, p: OauthPending, code: Str) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.code_params")
+    with_client_auth(c, [("grant_type", "authorization_code"), ("code", code),
+                         ("redirect_uri", p.redirect_uri), ("code_verifier", p.verifier)])
 
 // The body parameters of a client-credentials request
 // (RFC 6749 § 4.4.2).
@@ -695,7 +830,7 @@ pub fn code_params(c: OauthClient, p: OauthPending, code: Str) -> [(Str, Str)] [
 //     println("${list.len(oauthmsg.client_credentials_params(c, ["api"]))}")
 // ```
 pub fn client_credentials_params(c: OauthClient, scopes: [Str]) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.client_credentials_params")
+    with_client_auth(c, with_scope([("grant_type", "client_credentials")], scopes))
 
 // The body parameters of a device authorization request
 // (RFC 8628 § 3.1).
@@ -709,7 +844,7 @@ pub fn client_credentials_params(c: OauthClient, scopes: [Str]) -> [(Str, Str)] 
 //     println("${list.len(oauthmsg.device_params(c, ["openid"]))}")
 // ```
 pub fn device_params(c: OauthClient, scopes: [Str]) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.device_params")
+    with_client_auth(c, with_scope([], scopes))
 
 // The body parameters of a device token poll (RFC 8628 § 3.4).
 //
@@ -726,7 +861,8 @@ pub fn device_params(c: OauthClient, scopes: [Str]) -> [(Str, Str)] []
 //     println("${list.len(oauthmsg.device_token_params(c, "dev-code"))}")
 // ```
 pub fn device_token_params(c: OauthClient, device_code: Str) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.device_token_params")
+    with_client_auth(c, [("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                         ("device_code", device_code)])
 
 // The body parameters of a refresh (RFC 6749 § 6).
 //
@@ -743,7 +879,9 @@ pub fn device_token_params(c: OauthClient, device_code: Str) -> [(Str, Str)] []
 //     println("${list.len(oauthmsg.refresh_params(c, "r-token", []))}")
 // ```
 pub fn refresh_params(c: OauthClient, refresh_token: Str, scopes: [Str]) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.refresh_params")
+    with_client_auth(c, with_scope([("grant_type", "refresh_token"),
+                                    ("refresh_token", refresh_token)],
+                                    scopes))
 
 // The body parameters of a revocation (RFC 7009 § 2.1).
 //
@@ -756,7 +894,7 @@ pub fn refresh_params(c: OauthClient, refresh_token: Str, scopes: [Str]) -> [(St
 //     println("${list.len(oauthmsg.revoke_params(c, "tok", "refresh_token"))}")
 // ```
 pub fn revoke_params(c: OauthClient, token: Str, type_hint: Str) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.revoke_params")
+    with_client_auth(c, with_hint([("token", token)], type_hint))
 
 // The body parameters of an introspection (RFC 7662 § 2.1).
 //
@@ -769,7 +907,7 @@ pub fn revoke_params(c: OauthClient, token: Str, type_hint: Str) -> [(Str, Str)]
 //     println("${list.len(oauthmsg.introspect_params(c, "tok", ""))}")
 // ```
 pub fn introspect_params(c: OauthClient, token: Str, type_hint: Str) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.introspect_params")
+    with_client_auth(c, with_hint([("token", token)], type_hint))
 
 // The client's credentials added to a parameter list, where the client
 // presents them in the body.
@@ -788,7 +926,17 @@ pub fn introspect_params(c: OauthClient, token: Str, type_hint: Str) -> [(Str, S
 //     println("${list.len(oauthmsg.with_client_auth(c, []))}")
 // ```
 pub fn with_client_auth(c: OauthClient, params: [(Str, Str)]) -> [(Str, Str)] []
-    todo("oauth2-nv.oauthmsg.with_client_auth")
+    match c.auth
+        OauthAuthBasic                      => params[:]
+        OauthAuthPost                       =>
+            var out = list.concat(params, [("client_id", c.client_id)])
+            if c.client_secret != ""
+                out = list.push(out, ("client_secret", c.client_secret))
+            out
+        OauthAuthNone                       => list.concat(params, [("client_id", c.client_id)])
+        OauthAuthAssertion(kind, assertion) =>
+            let a = list.concat(params, [("client_id", c.client_id)])
+            list.concat(a, [("client_assertion_type", kind), ("client_assertion", assertion)])
 
 // The `Authorization` header for a client that presents its
 // credentials there, or `None` for one that does not.
@@ -809,7 +957,11 @@ pub fn with_client_auth(c: OauthClient, params: [(Str, Str)]) -> [(Str, Str)] []
 //         None    => println("in the body instead")
 // ```
 pub fn auth_header(c: OauthClient) -> ?Str []
-    todo("oauth2-nv.oauthmsg.auth_header")
+    match c.auth
+        OauthAuthBasic =>
+            let raw = "${formurl.encode(c.client_id)}:${formurl.encode(c.client_secret)}"
+            Some("Basic " + base64.encode(bytes.from_str(raw), B64Standard, B64Padded))
+        _              => None
 
 // A parameter list as an `application/x-www-form-urlencoded` body.
 //
@@ -823,7 +975,7 @@ pub fn auth_header(c: OauthClient) -> ?Str []
 //     println(oauthmsg.encode_body([("grant_type", "refresh_token")]))
 // ```
 pub fn encode_body(params: [(Str, Str)]) -> Str []
-    todo("oauth2-nv.oauthmsg.encode_body")
+    formurl.serialise(params)
 
 // ── Reading what came back ───────────────────────────────────────────
 
@@ -851,7 +1003,33 @@ pub fn encode_body(params: [(Str, Str)]) -> Str []
 // ```
 pub fn read_token_response(body: Str,
                            arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthmsg.read_token_response")
+    match json.parse(body)
+        None    => Err(oautherr.OauthMalformedResponse("the body is not JSON"))
+        Some(v) =>
+            if json.type_of(v) != "object"
+                Err(oautherr.OauthMalformedResponse("the body is not a JSON object"))
+            else
+                match json.get_str(v, "access_token")
+                    None         =>
+                        match json.get_str(v, "error")
+                            Some(code) => Err(oautherr.fault_named(code, json.get_str(v, "error_description") ?? "",
+                                                                   json.get_str(v, "error_uri") ?? ""))
+                            None       => Err(oautherr.OauthMissingField("access_token"))
+                    Some(access) =>
+                        match json.get_str(v, "token_type")
+                            None       => Err(oautherr.OauthMissingField("token_type"))
+                            Some(kind) =>
+                                let base = oauthtoken.OauthToken {
+                                    access_token: access,
+                                    token_type: oauthtoken.token_type_named(kind),
+                                    expires_at: None,
+                                    refresh_token: json.get_str(v, "refresh_token") ?? "",
+                                    scope: json.get_str(v, "scope") ?? "",
+                                    id_token: json.get_str(v, "id_token") ?? "",
+                                    raw_json: body }
+                                match int_member(v, "expires_in")
+                                    None    => Ok(base)
+                                    Some(n) => oauthtoken.with_expires_in(base, n, arrived_at)
 
 // A token endpoint's error response (RFC 6749 § 5.2), as a fault.
 //
@@ -867,7 +1045,17 @@ pub fn read_token_response(body: Str,
 //     println(oauthmsg.fault_of(400, "{\"error\":\"invalid_grant\"}"))
 // ```
 pub fn fault_of(status: Int, body: Str) -> oautherr.OauthFault []
-    todo("oauth2-nv.oauthmsg.fault_of")
+    match json.parse(body)
+        None    => fault_by_status(status)
+        Some(v) =>
+            let code = if json.type_of(v) == "object"
+                json.get_str(v, "error")
+            else
+                None
+            match code
+                Some(c) => oautherr.fault_named(c, json.get_str(v, "error_description") ?? "",
+                                                json.get_str(v, "error_uri") ?? "")
+                None    => fault_by_status(status)
 
 // A device authorization response (RFC 8628 § 3.2).
 //
@@ -884,7 +1072,29 @@ pub fn fault_of(status: Int, body: Str) -> oautherr.OauthFault []
 //         Err(_) => println("not a device response")
 // ```
 pub fn read_device_response(body: Str) -> Result<OauthDeviceGrant, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthmsg.read_device_response")
+    match json.parse(body)
+        None    => Err(oautherr.OauthMalformedResponse("the body is not JSON"))
+        Some(v) =>
+            if json.type_of(v) != "object"
+                Err(oautherr.OauthMalformedResponse("the body is not a JSON object"))
+            else
+                let uri = json.get_str(v, "verification_uri") ?? (json.get_str(v, "verification_url") ?? "")
+                match json.get_str(v, "device_code")
+                    None         => Err(oautherr.OauthMissingField("device_code"))
+                    Some(device) =>
+                        match json.get_str(v, "user_code")
+                            None       => Err(oautherr.OauthMissingField("user_code"))
+                            Some(user) =>
+                                if uri == ""
+                                    Err(oautherr.OauthMissingField("verification_uri"))
+                                else
+                                    let every = int_member(v, "interval") ?? 5
+                                    Ok(OauthDeviceGrant {
+                                        device_code: device, user_code: user,
+                                        verification_uri: uri,
+                                        verification_uri_complete: json.get_str(v, "verification_uri_complete") ?? "",
+                                        expires_in: int_member(v, "expires_in") ?? 900,
+                                        interval: (if every < 1 then 5 else every) })
 
 // The text to put in front of an end user for a device flow.
 //
@@ -902,4 +1112,99 @@ pub fn read_device_response(body: Str) -> Result<OauthDeviceGrant, oautherr.Oaut
 //         Ok(g)  => println(oauthmsg.device_prompt(g))
 // ```
 pub fn device_prompt(g: OauthDeviceGrant) -> Str []
-    todo("oauth2-nv.oauthmsg.device_prompt")
+    "To sign in, open ${g.verification_uri} and enter the code ${g.user_code}"
+
+// ── Private helpers ──────────────────────────────────────────────────
+
+// RFC 3986 `unreserved`: letters, digits, `-`, `.`, `_`, `~`.
+fn unreserved(b: Int) -> Bool []
+    b >= 65 and b <= 90 or b >= 97 and b <= 122 or b >= 48 and b <= 57
+        or b == 45 or b == 46 or b == 95 or b == 126
+
+// Equality that takes as long for a near miss as for a far one, for
+// comparing a value an attacker supplies against one this client holds.
+fn same_text(a: Str, b: Str) -> Bool []
+    if str.len(a) != str.len(b)
+        false
+    else
+        var diff = 0
+        var i = 0
+        while i < str.len(a)
+            diff = diff | (str.byte_at_or(a, i, 0) ^ str.byte_at_or(b, i, 0))
+            i = i + 1
+        diff == 0
+
+// Whether the callback's state is the one this flow sent.  An empty
+// expected state never matches: a flow that sent none checked nothing.
+fn state_ok(p: OauthPending, got: Str) -> Bool []
+    p.state != "" and same_text(p.state, got)
+
+// A host that RFC 8252 § 8.3 treats as loopback: 127.0.0.0/8 or ::1.
+fn is_loopback(host: Str) -> Bool []
+    host == "[::1]" or host == "::1" or str.starts_with(host, "127.")
+
+// A `scope` pair added when the list is not empty.
+fn with_scope(params: [(Str, Str)], scopes: [Str]) -> [(Str, Str)] []
+    if list.len(scopes) == 0
+        params[:]
+    else
+        list.concat(params, [("scope", scope_join(scopes))])
+
+// A `token_type_hint` pair added when the hint is not empty.
+fn with_hint(params: [(Str, Str)], hint: Str) -> [(Str, Str)] []
+    if hint == ""
+        params[:]
+    else
+        list.concat(params, [("token_type_hint", hint)])
+
+// A numeric member: a JSON integer, or a string of digits, which some
+// providers send for `expires_in`.
+fn int_member(v: JsonValueH, name: Str) -> ?Int []
+    match json.get_int(v, name)
+        Some(n) => Some(n)
+        None    =>
+            match json.get_str(v, name)
+                Some(s) => str.to_int(s)
+                None    => None
+
+// The fault a reply stands for when it names no `error` of its own.
+fn fault_by_status(status: Int) -> oautherr.OauthFault []
+    if status == 401
+        oautherr.OauthInvalidClient("HTTP 401 with no error member", "")
+    else if status == 503
+        oautherr.OauthTemporarilyUnavailable("HTTP 503", "")
+    else if status >= 500
+        oautherr.OauthServerError("HTTP ${status}", "")
+    else
+        oautherr.OauthMalformedResponse("HTTP ${status} with no error member")
+
+// Whether parsed URL parts may carry an OAuth exchange.
+fn parts_ok(p: href.UrlParts) -> Bool []
+    let scheme = str.lower(p.scheme)
+    if scheme == "https"
+        p.host != ""
+    else if scheme == "http"
+        is_loopback(p.host)
+    else
+        false
+
+// The endpoint with `query` appended to whatever query it already
+// carries, or refused when it is not an endpoint an exchange may use.
+fn with_query(endpoint: Str, query: Str) -> Result<Str, oautherr.OauthFault> []
+    match href.parse_parts(endpoint)
+        Err(_)    => Err(oautherr.OauthInsecureEndpoint(endpoint))
+        Ok(parts) =>
+            if not parts_ok(parts)
+                Err(oautherr.OauthInsecureEndpoint(endpoint))
+            else
+                let joined = match parts.query
+                    Some(q) => if q == ""
+                        query
+                    else
+                        "${q}&${query}"
+                    None    => query
+                Ok(href.serialize(UrlParts { scheme: parts.scheme, username: parts.username,
+                                             password: parts.password, host: parts.host,
+                                             has_authority: parts.has_authority,
+                                             port: parts.port, path: parts.path,
+                                             query: Some(joined), fragment: parts.fragment }))

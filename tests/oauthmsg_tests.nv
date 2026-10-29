@@ -1,10 +1,6 @@
 // oauthmsg_tests.nv — the message arithmetic, against the RFCs' own
 // example values.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: oauth2-nv.<module>.<fn>`.
-// That is the expected result until the bodies land.
-//
 // THE VECTORS ARE THE SPECIFICATIONS' OWN.  RFC 7636 Appendix B
 // publishes a verifier and the challenge it hashes to, which is the
 // one PKCE vector everybody implements against; RFC 6749 § 2.3.1,
@@ -14,9 +10,13 @@
 // a value this package invented.
 
 use std.test
+use std.bytes
 use std.list
 use std.str
+use arith
 use civil
+use span
+use oauthtoken
 use formurl
 use oautherr
 use oauthmsg
@@ -69,7 +69,7 @@ fn test_a_client_is_public_until_it_is_given_a_secret() [io]
 
 @test
 fn test_plain_is_the_weak_pkce_method_and_says_so() [io]
-    test.case("S256 is not weak")
+    test.case("S256 is not plain_client")
     test.assert(not oauthmsg.pkce_is_weak(oauthmsg.OauthPkceS256))
 
     test.case("plain is, because the verifier travels in the authorization request")
@@ -444,3 +444,306 @@ fn test_the_device_prompt_shows_both_halves() [io]
             let line = oauthmsg.device_prompt(g)
             test.assert(str.contains(line, "WDJB-MJHT"))
             test.assert(str.contains(line, "https://example.com/device"))
+
+// ── Exact bytes, from Python's urllib and hashlib ────────────────────
+//
+// The expected strings below were produced by `urllib.parse.urlencode`,
+// `hashlib.sha256` and `base64` in Python, not by this package.
+
+fn full_client() -> oauthmsg.OauthClient []
+    oauthmsg.with_scopes(oauthmsg.client("s6BhdRkqt3", "https://client.example.com/cb"),
+                         ["openid", "email"])
+
+@test
+fn test_the_authorization_url_is_byte_for_byte_what_python_writes() [io]
+    let c = full_client()
+    let p = oauthmsg.pending(c, "xyz", "n-0S6_WzA2Mj", rfc7636_verifier())
+    match oauthmsg.authorize_url("https://server.example.com/authorize", c, p, [])
+        Err(_) => test.fail("refused")
+        Ok(u)  =>
+            test.assert_eq_str(u,
+                "https://server.example.com/authorize?response_type=code&client_id=s6BhdRkqt3&redirect_uri=https%3A%2F%2Fclient.example.com%2Fcb&scope=openid+email&state=xyz&nonce=n-0S6_WzA2Mj&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256")
+
+    test.case("an endpoint that already has a query keeps it")
+    match oauthmsg.authorize_url("https://server.example.com/authorize?tenant=a", c, p, [])
+        Err(_) => test.fail("refused")
+        Ok(u)  => test.assert(str.starts_with(u, "https://server.example.com/authorize?tenant=a&response_type=code"))
+    match oauthmsg.authorize_url("https://server.example.com/authorize?", c, p, [])
+        Err(_) => test.fail("refused")
+        Ok(u)  => test.assert(str.starts_with(u, "https://server.example.com/authorize?response_type=code"))
+
+    test.case("a plain-method client sends the verifier as the challenge")
+    let plain_client = oauthmsg.with_pkce(c, oauthmsg.OauthPkcePlain)
+    match oauthmsg.authorize_url("https://server.example.com/authorize", plain_client, p, [])
+        Err(_) => test.fail("refused")
+        Ok(u)  =>
+            test.assert(str.contains(u, "code_challenge_method=plain"))
+            test.assert(str.contains(u, "code_challenge=${rfc7636_verifier()}"))
+
+@test
+fn test_an_authorization_request_that_cannot_work_is_refused_by_name() [io]
+    let c = full_client()
+    let p = oauthmsg.pending(c, "xyz", "", rfc7636_verifier())
+    test.case("no client_id")
+    let no_id = oauthmsg.client("", "https://client.example.com/cb")
+    match oauthmsg.authorize_url("https://id.example/a", no_id, oauthmsg.pending(no_id, "s", "", rfc7636_verifier()), [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "client_id"))
+    test.case("no redirect_uri")
+    let no_redirect = oauthmsg.client("id", "")
+    match oauthmsg.authorize_url("https://id.example/a",
+        no_redirect,
+        oauthmsg.pending(no_redirect, "s", "", rfc7636_verifier()),
+        [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "redirect_uri"))
+    test.case("a verifier outside the grammar")
+    match oauthmsg.authorize_url("https://id.example/a", c, oauthmsg.pending(c, "s", "", "short"), [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "code_verifier"))
+    test.case("an endpoint that does not parse")
+    match oauthmsg.authorize_url("not a url", c, p, [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(oautherr.fault_code(f), "")
+    test.case("an extra parameter repeating another sent parameter, in either position")
+    match oauthmsg.authorize_url("https://id.example/a", c, p, [("scope", "x")])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "'scope'"))
+
+@test
+fn test_the_endpoint_check_reads_scheme_and_host() [io]
+    test.assert(oauthmsg.endpoint_ok("HTTPS://id.example/a"))
+    test.assert(oauthmsg.endpoint_ok("http://127.1.2.3/a"))
+    test.assert(not oauthmsg.endpoint_ok("ftp://127.0.0.1/a"))
+    test.assert(not oauthmsg.endpoint_ok("http://localhost/a"))
+    test.assert(not oauthmsg.endpoint_ok("https:///a"))
+    test.assert(not oauthmsg.endpoint_ok("no scheme"))
+
+@test
+fn test_scope_ok_follows_rfc_6749_3_3() [io]
+    test.assert(oauthmsg.scope_ok("a"))
+    test.assert(not oauthmsg.scope_ok(""))
+    test.assert(not oauthmsg.scope_ok(" a"))
+    test.assert(not oauthmsg.scope_ok("a "))
+    test.assert(not oauthmsg.scope_ok("a  b"))
+    test.assert(not oauthmsg.scope_ok("a\"b"))
+    test.assert(not oauthmsg.scope_ok("a\\b"))
+    test.assert(not oauthmsg.scope_ok("a\u{7f}b"))
+    test.assert(oauthmsg.scope_ok("https://example.com/auth/drive"))
+
+@test
+fn test_verifiers_are_base64url_without_padding() [io]
+    test.assert_eq_str(oauthmsg.verifier_of(bytes.from_byte_list([251, 255, 191])), "-_-_")
+    test.assert_eq_str(oauthmsg.verifier_of(bytes.from_byte_list([255])), "_w")
+
+@test
+fn test_pkce_pairs_are_checked_both_ways() [io]
+    test.assert(not oauthmsg.pkce_matches(rfc7636_verifier(), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cX",
+                                          oauthmsg.OauthPkceS256))
+    test.assert(not oauthmsg.pkce_matches(rfc7636_verifier(), "short", oauthmsg.OauthPkceS256))
+    test.assert(not oauthmsg.pkce_matches("short", "short", oauthmsg.OauthPkcePlain))
+    test.assert(oauthmsg.pkce_matches(rfc7636_verifier(), rfc7636_verifier(), oauthmsg.OauthPkcePlain))
+
+@test
+fn test_a_client_that_holds_a_secret_by_assertion_is_confidential() [io]
+    let c = oauthmsg.with_secret(oauthmsg.client("id", ""), "",
+                                 oauthmsg.OauthAuthAssertion("urn:ietf:params:oauth:client-assertion-type:jwt-bearer", "a.b.c"))
+    test.assert(oauthmsg.is_confidential(c))
+    test.assert(not oauthmsg.is_confidential(oauthmsg.with_secret(oauthmsg.client("id", ""), "", oauthmsg.OauthAuthBasic)))
+
+@test
+fn test_callbacks_that_carry_more_or_less_than_one_answer() [io]
+    test.case("a refusal carries its description and uri")
+    match oauthmsg.read_callback("error=access_denied&error_description=No+thanks&error_uri=https%3A%2F%2Fe%2Fx&state=s")
+        OauthCallbackRefused(e, d, u, s) =>
+            test.assert_eq_str(e, "access_denied")
+            test.assert_eq_str(d, "No thanks")
+            test.assert_eq_str(u, "https://e/x")
+            test.assert_eq_str(s, "s")
+        _                                => test.fail("not a refusal")
+    test.case("both a code and an error")
+    match oauthmsg.read_callback("code=a&error=b&state=s")
+        OauthCallbackUnreadable(d) => test.assert(str.contains(d, "both"))
+        _                          => test.fail("read")
+    test.case("a repeated error_description")
+    match oauthmsg.read_callback("error=b&error_description=1&error_description=2")
+        OauthCallbackUnreadable(d) => test.assert(str.contains(d, "error_description"))
+        _                          => test.fail("read")
+    test.case("neither, and the state of an unreadable one")
+    test.assert_eq_str(oauthmsg.callback_state(oauthmsg.read_callback("x=1")), "")
+    test.case("a callback with a code and no state keeps an empty state")
+    test.assert_eq_str(oauthmsg.callback_state(oauthmsg.read_callback("code=a")), "")
+
+@test
+fn test_check_state_refuses_everything_it_cannot_trust() [io]
+    let c = full_client()
+    let p = oauthmsg.pending(c, "xyz", "", rfc7636_verifier())
+    test.case("a flow that sent no state accepts no callback")
+    let none = oauthmsg.pending(c, "", "", rfc7636_verifier())
+    match oauthmsg.check_state(none, oauthmsg.read_callback("code=a"))
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "state"))
+    test.case("a refusal with the wrong state is a mismatch, not the server's word")
+    match oauthmsg.check_state(p, oauthmsg.read_callback("error=access_denied&state=other"))
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(oautherr.fault_code(f), "")
+    test.case("an unreadable callback")
+    match oauthmsg.check_state(p, oauthmsg.read_callback("nonsense=1"))
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "neither"))
+    test.case("an empty code")
+    match oauthmsg.check_state(p, oauthmsg.read_callback("code=&state=xyz"))
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "code"))
+    test.case("an issuer the flow did not start against")
+    let pi = oauthmsg.with_issuer(p, "https://id.example")
+    match oauthmsg.check_state(pi, oauthmsg.read_callback("code=a&state=xyz&iss=https%3A%2F%2Fevil"))
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "refused the issuer"))
+    test.case("no iss in the callback passes when the flow knows its issuer")
+    match oauthmsg.check_state(pi, oauthmsg.read_callback("code=a&state=xyz"))
+        Ok(code) => test.assert_eq_str(code, "a")
+        Err(_)   => test.fail("refused")
+
+@test
+fn test_the_request_bodies_are_exact() [io]
+    let v = rfc7636_verifier()
+    test.case("client_secret_post sends id and secret in the body")
+    let post = oauthmsg.with_secret(full_client(), "gX1fBat3bV", oauthmsg.OauthAuthPost)
+    let p = oauthmsg.pending(post, "xyz", "", v)
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.code_params(post, p, "c o")),
+                       "grant_type=authorization_code&code=c+o&redirect_uri=https%3A%2F%2Fclient.example.com%2Fcb&code_verifier=${v}&client_id=s6BhdRkqt3&client_secret=gX1fBat3bV")
+    test.case("client_secret_basic leaves them to the header")
+    let basic = oauthmsg.with_secret(full_client(), "gX1fBat3bV", oauthmsg.OauthAuthBasic)
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.refresh_params(basic, "r", ["a", "b"])),
+                       "grant_type=refresh_token&refresh_token=r&scope=a+b")
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.refresh_params(basic, "r", [])),
+                       "grant_type=refresh_token&refresh_token=r")
+    test.case("a public client names itself")
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.client_credentials_params(full_client(), ["api"])),
+                       "grant_type=client_credentials&scope=api&client_id=s6BhdRkqt3")
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.device_params(full_client(), [])),
+                       "client_id=s6BhdRkqt3")
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.device_token_params(full_client(), "dc")),
+                       "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=dc&client_id=s6BhdRkqt3")
+    test.case("post without a secret sends only the id")
+    let nosecret = oauthmsg.with_secret(full_client(), "", oauthmsg.OauthAuthPost)
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.with_client_auth(nosecret, [])), "client_id=s6BhdRkqt3")
+    test.case("an assertion client sends the signed assertion")
+    let asr = oauthmsg.with_secret(full_client(), "", oauthmsg.OauthAuthAssertion("T", "a.b.c"))
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.with_client_auth(asr, [])),
+                       "client_id=s6BhdRkqt3&client_assertion_type=T&client_assertion=a.b.c")
+    test.case("revocation and introspection, with and without a hint")
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.revoke_params(basic, "t", "refresh_token")),
+                       "token=t&token_type_hint=refresh_token")
+    test.assert_eq_str(oauthmsg.encode_body(oauthmsg.introspect_params(basic, "t", "")), "token=t")
+
+@test
+fn test_the_basic_credential_is_form_encoded_then_base64ed_as_python_does() [io]
+    let a = oauthmsg.with_secret(oauthmsg.client("id", ""), "a+b", oauthmsg.OauthAuthBasic)
+    test.assert_eq_str(oauthmsg.auth_header(a) ?? "-", "Basic aWQ6YSUyQmI=")
+    let b = oauthmsg.with_secret(oauthmsg.client("id", ""), "p%ss w:d", oauthmsg.OauthAuthBasic)
+    test.assert_eq_str(oauthmsg.auth_header(b) ?? "-", "Basic aWQ6cCUyNXNzK3clM0Fk")
+
+@test
+fn test_token_responses_in_the_shapes_providers_send() [io]
+    let at = a_moment()
+    test.case("expires_in as a string of digits, with scope and id_token")
+    match oauthmsg.read_token_response("{\"access_token\":\"a\",\"token_type\":\"Bearer\",\"expires_in\":\"60\",\"scope\":\"x y\",\"id_token\":\"i.d.t\"}",
+        at)
+        Err(_) => test.fail("refused")
+        Ok(t)  =>
+            test.assert_eq_str(t.scope, "x y")
+            test.assert_eq_str(t.id_token, "i.d.t")
+            test.assert_eq(oauthtoken.seconds_left(t, at) ?? 0 - 1, 60)
+    test.case("no expires_in means no expiry, not an infinite one")
+    match oauthmsg.read_token_response("{\"access_token\":\"a\",\"token_type\":\"Bearer\"}", at)
+        Err(_) => test.fail("refused")
+        Ok(t)  => test.assert(not oauthtoken.has_expiry(t))
+    test.case("expires_in that is neither a number nor digits")
+    match oauthmsg.read_token_response("{\"access_token\":\"a\",\"token_type\":\"Bearer\",\"expires_in\":\"soon\"}", at)
+        Err(_) => test.fail("refused")
+        Ok(t)  => test.assert(not oauthtoken.has_expiry(t))
+    test.case("an expires_in past the calendar is an error")
+    match oauthmsg.read_token_response("{\"access_token\":\"a\",\"token_type\":\"Bearer\",\"expires_in\":90000000000000000}", at)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "calendar"))
+    test.case("a 200 that carries an error, as GitHub sends")
+    match oauthmsg.read_token_response("{\"error\":\"bad_verification_code\",\"error_description\":\"expired\"}", at)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(oautherr.fault_description(f), "expired")
+    match oauthmsg.read_token_response("{\"error\":\"bad_verification_code\"}", at)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(oautherr.fault_description(f), "")
+    test.case("an array is not a token response")
+    match oauthmsg.read_token_response("[1]", at)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "object"))
+
+@test
+fn test_every_status_the_error_reader_distinguishes() [io]
+    match oauthmsg.fault_of(400,
+        "{\"error\":\"invalid_grant\",\"error_description\":\"used\",\"error_uri\":\"https://e/x\"}")
+        OauthInvalidGrant(d, u) =>
+            test.assert_eq_str(d, "used")
+            test.assert_eq_str(u, "https://e/x")
+        _                       => test.fail("wrong fault")
+    test.assert_eq_str(oautherr.fault_code(oauthmsg.fault_of(401, "")), "invalid_client")
+    test.assert_eq_str(oautherr.fault_code(oauthmsg.fault_of(503, "")), "temporarily_unavailable")
+    test.assert_eq_str(oautherr.fault_code(oauthmsg.fault_of(500, "oops")), "server_error")
+    test.assert(oautherr.is_retryable(oauthmsg.fault_of(502, "")))
+    test.assert(not oautherr.is_retryable(oauthmsg.fault_of(404, "not found")))
+    test.case("a body that is JSON and not an object")
+    test.assert_eq_str(oautherr.fault_code(oauthmsg.fault_of(400, "[1]")), "")
+    test.case("an object whose error is not a string")
+    test.assert(not oautherr.is_retryable(oauthmsg.fault_of(400, "{\"error\":5}")))
+
+@test
+fn test_device_responses_in_the_shapes_providers_send() [io]
+    test.case("Google spells the address verification_url")
+    match oauthmsg.read_device_response("{\"device_code\":\"d\",\"user_code\":\"U\",\"verification_url\":\"https://g/device\",\"expires_in\":1800,\"interval\":7}")
+        Err(_) => test.fail("refused")
+        Ok(g)  =>
+            test.assert_eq_str(g.verification_uri, "https://g/device")
+            test.assert_eq(g.interval, 7)
+            test.assert_eq_str(g.verification_uri_complete, "")
+    test.case("an absent expires_in is 900 and an interval below one is five")
+    match oauthmsg.read_device_response("{\"device_code\":\"d\",\"user_code\":\"U\",\"verification_uri\":\"https://x/d\",\"interval\":0}")
+        Err(_) => test.fail("refused")
+        Ok(g)  =>
+            test.assert_eq(g.expires_in, 900)
+            test.assert_eq(g.interval, 5)
+    test.case("each missing member is named")
+    match oauthmsg.read_device_response("{\"device_code\":\"d\",\"verification_uri\":\"https://x/d\"}")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "user_code"))
+    match oauthmsg.read_device_response("{\"device_code\":\"d\",\"user_code\":\"U\"}")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "verification_uri"))
+    test.case("not JSON, and JSON that is not an object")
+    match oauthmsg.read_device_response("<html>")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "JSON"))
+    match oauthmsg.read_device_response("[]")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "object"))
+
+@test
+fn test_a_pending_flow_ages_in_whole_seconds() [io]
+    let c = full_client()
+    let at = a_moment()
+    let p = oauthmsg.started_at(oauthmsg.pending(c, "s", "n", rfc7636_verifier()), at)
+    match arith.add_delta(at, span.seconds(90))
+        Err(_)  => test.fail("calendar")
+        Ok(now) => test.assert_eq(oauthmsg.pending_age(p, now) ?? 0 - 1, 90)
+    test.case("the redaction says when, and says undated when not")
+    test.assert(str.contains(oauthmsg.pending_redacted(p), "started_at=2026-9-11"))
+    test.assert(str.contains(oauthmsg.pending_redacted(oauthmsg.pending(c, "s", "n", "v")), "undated"))
+    test.assert(str.contains(oauthmsg.pending_redacted(p), "verifier=<43 bytes>"))
+
+@test
+fn test_authorize_params_without_a_usable_verifier_omit_the_challenge() [io]
+    let c = full_client()
+    let ps = oauthmsg.authorize_params(c, oauthmsg.pending(c, "s", "", "short"), [("prompt", "login")])
+    test.assert_eq(list.len(ps), 6)
+    test.assert_eq_str(ps[5].0, "prompt")

@@ -423,10 +423,23 @@ pub fn redacted(t: OauthToken) -> Str []
         None     => "none"
     "OauthToken(access_token=${secret_len(t.access_token)}, token_type=${token_type_name(t.token_type)}, expires_at=${expiry}, refresh_token=${secret_len(t.refresh_token)}, scope=${t.scope}, id_token=${secret_len(t.id_token)})"
 
-// Seconds since 1970-01-01T00:00:00 of a civil date-time, whole seconds.
-// Pure integer arithmetic on the epoch day, so two readings compare
-// without a calendar error to handle.
-fn unix_seconds(dt: civil.CivilDateTime) -> Int []
+// Seconds since 1970-01-01T00:00:00 of a civil date-time, whole
+// seconds, with the sub-second part dropped.
+//
+// Pure integer arithmetic on the epoch day, so two readings subtract
+// without a calendar error to handle.  The unit the JWT claims `exp`
+// and `iat` are written in, which is what `oauthoidc` passes to jwt-nv.
+//
+// ```novo
+// use civil
+// use oauthtoken
+//
+// fn main() [io]
+//     match civil.date(1970, 1, 2)
+//         Err(_) => println("no")
+//         Ok(d)  => println("${oauthtoken.unix_seconds(civil.datetime(d, civil.midnight()))}")   // 86400
+// ```
+pub fn unix_seconds(dt: civil.CivilDateTime) -> Int []
     civil.epoch_day(dt.date) * 86400 + dt.time.hour * 3600 + dt.time.minute * 60 + dt.time.second
 
 // A scope string split on runs of spaces, empties dropped.
