@@ -5,6 +5,68 @@ All notable changes to oauth2-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-10-29
+
+Every body is implemented; the stability is `experimental`.
+
+### Changed (breaking)
+
+- The network functions' effect rows widen from `[net, async]` to
+  `[io, net, time, async]`: `oauthflow.post_form`, `exchange_code`,
+  `client_credentials`, `device_begin`, `device_poll`, `refresh`,
+  `ensure_fresh`, `revoke` and `introspect`; `device_wait` gains `io`.
+  The standard library's one-shot `http.client.post` answers only the
+  body of a 2xx reply and cannot carry an `Authorization` header, so it
+  cannot read an `invalid_grant` or send `client_secret_basic`. The
+  connection client can, and costs `[io, net, time, async]`.
+- `oautherr.OauthSlowDown(interval_secs)` carries a floor on the new
+  wait and not the new interval. `poll_delay` answers the larger of
+  that floor and the grant's interval plus five seconds. The wire never
+  names an interval, so `fault_named` builds `OauthSlowDown(0)`.
+- `oauthflow.post_form` and `oauthmsg.authorize_url` accept an `http`
+  endpoint only when the host is a loopback address (127.0.0.0/8 or
+  `::1`), the exception RFC 8252 section 8.3 makes for redirects.
+  `oauthdisc` applies the same rule to an issuer and to the addresses
+  it fetches.
+- `oauthflow.post_form` takes parameters that already carry the
+  client's body credentials (the `oauthmsg.*_params` functions add
+  them) and adds only the `Authorization` header, so a credential is
+  never sent twice.
+- A device authorization response without `expires_in` reads as 900
+  seconds, and an `interval` below one reads as five.
+- A redirect from a token, device, revocation or introspection endpoint
+  is not followed, so credentials are never replayed to another address.
+
+### Added
+
+- `oauthtoken.unix_seconds`, the unit the JWT claims are written in.
+- `oauthflow.begin_from_draws`, `begin` over three byte draws already
+  made, which treats an absent draw as `OauthNoEntropy`.
+- The dependency ranges move to the registry's latest releases:
+  base64-nv ^0.1.1, calendar-nv ^0.2.1, crypto-nv ^0.1.7, form-nv ^0.1.1,
+  rand-nv ^0.1.9, url-nv ^0.1.4. jwt-nv and p256-nv are paths while
+  jwt-nv 0.1.0 and p256-nv 0.1.0 are not on the registry; they become
+  `^0.1.0` at publish.
+- Readers accept what providers send: `expires_in` as a string of
+  digits, a 200 reply that carries an `error` member (GitHub), and
+  `verification_url` for `verification_uri` (Google).
+- `read_jwks` reads P-256 and RSA signature keys and lists the others,
+  with the reason, in `jwks_skipped`.
+
+### Limitations
+
+- `oauthoidc.validate` verifies ES256 and HS256 identity tokens. jwt-nv
+  does not yet verify RSA signatures, so an RS256 token is refused with a
+  signature error.
+- The unreachable result of `claims_of_verified` after jwt-nv has
+  verified a token is excused from coverage with its reason at the site.
+
+### Tests
+
+Seven suites, a local authorization server for the network functions
+(`tests/oauthnet_tests.nv`), and `tests/coverage.sh`, which reports 100% of the
+lines under `src/`.
+
 ## 0.0.3 — 2026-09-25
 
 The package builds with novo 0.11.  Every body is still `todo()`.

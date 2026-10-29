@@ -1,8 +1,6 @@
 // oauthoidc.nv — the id_token, validated.  A policy over jwt-nv, not a
 // second JWT verifier.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // WHY THIS IS NOT A VERIFIER.  jwt-nv already holds the algorithm
 // allow-list, the signature check, the `exp`/`nbf`/`iat` arithmetic,
 // the issuer and audience requirement, the leeway and the maximum
@@ -38,12 +36,22 @@
 // here whenever the claim is present, and `check_at_hash` is public so
 // a caller can require it.
 
+use std.bytes
+use std.json
+use std.list
+use std.str
+use base64
 use civil
+use hashing
 use jwtalg
+use jwtclaims
+use jwterror
 use jwtpolicy
+use jwttoken
 use oautherr
 use oauthdisc
 use oauthmsg
+use oauthtoken
 
 // An id_token's claims, after validation (OpenID Connect Core § 2).
 //
@@ -114,7 +122,17 @@ pub struct OauthIdClaims
 //             println("${oauthoidc.policy_algs(pol)}")
 // ```
 pub fn policy_for(p: oauthdisc.OauthProvider, client_id: Str) -> jwtpolicy.JwtPolicy []
-    todo("oauth2-nv.oauthoidc.policy_for")
+    let published = p.id_token_signing_alg_values_supported
+    let algs = if list.len(published) == 0
+        [Rs256]
+    else
+        known_algs(published)
+    jwtpolicy.with_max_lifetime(
+        jwtpolicy.with_leeway(
+            jwtpolicy.requiring_subject(
+                jwtpolicy.requiring(jwtpolicy.allowing(jwtpolicy.strict(), algs), p.issuer, client_id)),
+            60),
+        86400)
 
 // The algorithms a policy admits, as one space-joined string.
 //
@@ -129,7 +147,7 @@ pub fn policy_for(p: oauthdisc.OauthProvider, client_id: Str) -> jwtpolicy.JwtPo
 //     println(oauthoidc.policy_algs(jwtpolicy.strict()))
 // ```
 pub fn policy_algs(p: jwtpolicy.JwtPolicy) -> Str []
-    todo("oauth2-nv.oauthoidc.policy_algs")
+    str.join(list.map(p.allowed_algs, a => jwtalg.alg_name(a)), " ")
 
 // Validate an id_token whole: signature, claims, and OpenID Connect's
 // three extra checks.
@@ -171,7 +189,24 @@ pub fn policy_algs(p: jwtpolicy.JwtPolicy) -> Str []
 pub fn validate(id_token: Str, keys: [jwtalg.JwtVerifyingKey], p: oauthdisc.OauthProvider,
                 c: oauthmsg.OauthClient, pending: oauthmsg.OauthPending, access_token: Str,
                 now: civil.CivilDateTime) -> Result<OauthIdClaims, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthoidc.validate")
+    let policy = policy_for(p, c.client_id)
+    match jwttoken.decode(id_token)
+        Err(e) => Err(oautherr.OauthIdTokenRejected("not a JWT: ${e.message()}"))
+        Ok(t)  =>
+            match jwttoken.verify_with_keys(t, keys, policy,
+                                            jwtclaims.instant(oauthtoken.unix_seconds(now)))
+                Err(e) => Err(rejection(e))
+                Ok(v)  =>
+                    match claims_of_verified(jwttoken.claims_of(v).payload_json)
+                        // cov: skip — the policy makes jwt-nv require iss, sub, aud, exp and the iat its lifetime limit reads, so a verified payload always carries what `claims_of_verified` asks for
+                        Err(f) => Err(f)
+                        Ok(cl) =>
+                            let checks = [check_azp(cl, c.client_id), check_nonce(cl, pending),
+                                          (if access_token == "" then None
+                                          else check_at_hash(cl, access_token, jwttoken.verified_alg_of(v)))]
+                            match first_fault(checks)
+                                Some(f) => Err(f)
+                                None    => Ok(cl)
 
 // The claims of an id_token that has ALREADY been verified.
 //
@@ -189,7 +224,32 @@ pub fn validate(id_token: Str, keys: [jwtalg.JwtVerifyingKey], p: oauthdisc.Oaut
 //         Err(_) => println("not an id_token payload")
 // ```
 pub fn claims_of_verified(payload_json: Str) -> Result<OauthIdClaims, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthoidc.claims_of_verified")
+    match json.parse(payload_json)
+        None    => Err(oautherr.OauthMalformedResponse("the id_token payload is not JSON"))
+        Some(v) =>
+            let aud = audiences(v)
+            match (json.get_str(v, "iss"),
+                json.get_str(v, "sub"),
+                json.get_int(v, "exp"),
+                json.get_int(v, "iat"))
+                (Some(iss), Some(sub), Some(exp), Some(iat)) =>
+                    if list.len(aud) == 0
+                        Err(oautherr.OauthMissingField("aud"))
+                    else
+                        Ok(OauthIdClaims {
+                            iss: iss, sub: sub, aud: aud, exp: exp, iat: iat,
+                            nonce: json.get_str(v, "nonce") ?? "",
+                            auth_time: json.get_int(v, "auth_time") ?? 0,
+                            azp: json.get_str(v, "azp") ?? "",
+                            acr: json.get_str(v, "acr") ?? "",
+                            amr: string_list(v, "amr"),
+                            at_hash: json.get_str(v, "at_hash") ?? "",
+                            c_hash: json.get_str(v, "c_hash") ?? "",
+                            raw_json: payload_json })
+                (None, _, _, _)                              => Err(oautherr.OauthMissingField("iss"))
+                (_, None, _, _)                              => Err(oautherr.OauthMissingField("sub"))
+                (_, _, None, _)                              => Err(oautherr.OauthMissingField("exp"))
+                (_, _, _, None)                              => Err(oautherr.OauthMissingField("iat"))
 
 // The `nonce` check (§ 3.1.3.7 step 11).
 //
@@ -212,7 +272,10 @@ pub fn claims_of_verified(payload_json: Str) -> Result<OauthIdClaims, oautherr.O
 //                 None    => println("this flow's token")
 // ```
 pub fn check_nonce(cl: OauthIdClaims, p: oauthmsg.OauthPending) -> ?oautherr.OauthFault []
-    todo("oauth2-nv.oauthoidc.check_nonce")
+    if p.nonce == "" or p.nonce == cl.nonce
+        None
+    else
+        Some(oautherr.OauthNonceMismatch(p.nonce, cl.nonce))
 
 // The `azp` check (§ 3.1.3.7 steps 4 and 5).
 //
@@ -233,7 +296,17 @@ pub fn check_nonce(cl: OauthIdClaims, p: oauthmsg.OauthPending) -> ?oautherr.Oau
 //                 None    => println("ours")
 // ```
 pub fn check_azp(cl: OauthIdClaims, client_id: Str) -> ?oautherr.OauthFault []
-    todo("oauth2-nv.oauthoidc.check_azp")
+    if cl.azp != ""
+        if cl.azp == client_id
+            None
+        else
+            Some(oautherr.OauthIdTokenRejected("the token was issued to the authorized party '${cl.azp}', not to this client"))
+    else if list.len(cl.aud) == 1 and cl.aud[0] == client_id
+        None
+    else if list.len(cl.aud) > 1
+        Some(oautherr.OauthIdTokenRejected("the token has several audiences and no azp"))
+    else
+        Some(oautherr.OauthIdTokenRejected("the token's audience is not this client"))
 
 // The `at_hash` for an access token under a signing algorithm
 // (§ 3.1.3.6).
@@ -254,7 +327,7 @@ pub fn check_azp(cl: OauthIdClaims, client_id: Str) -> ?oautherr.OauthFault []
 //         Err(_) => println("no hash for that algorithm")
 // ```
 pub fn at_hash_of(access_token: Str, alg: jwtalg.JwtAlg) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthoidc.at_hash_of")
+    Ok(at_hash_value(access_token, alg))
 
 // The `at_hash` check (§ 3.1.3.6).
 //
@@ -280,7 +353,10 @@ pub fn at_hash_of(access_token: Str, alg: jwtalg.JwtAlg) -> Result<Str, oautherr
 // ```
 pub fn check_at_hash(cl: OauthIdClaims, access_token: Str,
                      alg: jwtalg.JwtAlg) -> ?oautherr.OauthFault []
-    todo("oauth2-nv.oauthoidc.check_at_hash")
+    if cl.at_hash == ""
+        None
+    else
+        require_at_hash(cl, access_token, alg)
 
 // The same check, refusing an ABSENT claim.
 //
@@ -301,7 +377,12 @@ pub fn check_at_hash(cl: OauthIdClaims, access_token: Str,
 // ```
 pub fn require_at_hash(cl: OauthIdClaims, access_token: Str,
                        alg: jwtalg.JwtAlg) -> ?oautherr.OauthFault []
-    todo("oauth2-nv.oauthoidc.require_at_hash")
+    if cl.at_hash == ""
+        Some(oautherr.OauthIdTokenRejected("the token has no at_hash and the caller requires one"))
+    else if same_text(cl.at_hash, at_hash_value(access_token, alg))
+        None
+    else
+        Some(oautherr.OauthIdTokenRejected("the at_hash is not the hash of the access token that arrived with it"))
 
 // The stable identity of the end user: the issuer and the subject,
 // together.
@@ -321,7 +402,7 @@ pub fn require_at_hash(cl: OauthIdClaims, access_token: Str,
 //         Ok(cl) => println(oauthoidc.identity(cl))
 // ```
 pub fn identity(cl: OauthIdClaims) -> Str []
-    todo("oauth2-nv.oauthoidc.identity")
+    "${cl.iss} ${cl.sub}"
 
 // A claim this struct does not model, as a string.
 //
@@ -341,7 +422,9 @@ pub fn identity(cl: OauthIdClaims) -> Str []
 //                 None    => println("the provider did not send one")
 // ```
 pub fn claim(cl: OauthIdClaims, name: Str) -> ?Str []
-    todo("oauth2-nv.oauthoidc.claim")
+    match json.parse(cl.raw_json)
+        None    => None
+        Some(v) => json.get_str(v, name)
 
 // A boolean claim, for `email_verified` and its neighbours.
 //
@@ -362,7 +445,9 @@ pub fn claim(cl: OauthIdClaims, name: Str) -> ?Str []
 //                 None    => println("the provider did not say")
 // ```
 pub fn claim_bool(cl: OauthIdClaims, name: Str) -> ?Bool []
-    todo("oauth2-nv.oauthoidc.claim_bool")
+    match json.parse(cl.raw_json)
+        None    => None
+        Some(v) => json.get_bool(v, name)
 
 // Fetch the userinfo endpoint with an access token
 // (OpenID Connect Core § 5.3), as raw JSON.
@@ -390,7 +475,15 @@ pub fn claim_bool(cl: OauthIdClaims, name: Str) -> ?Bool []
 // ```
 pub fn fetch_userinfo(p: oauthdisc.OauthProvider,
                       access_token: Str) -> Result<Str, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthoidc.fetch_userinfo")
+    if p.userinfo_endpoint == ""
+        Err(oautherr.OauthDiscoveryIncomplete("userinfo_endpoint"))
+    else if not oauthmsg.endpoint_ok(p.userinfo_endpoint)
+        Err(oautherr.OauthInsecureEndpoint(p.userinfo_endpoint))
+    else
+        match http.client.get_with_headers(p.userinfo_endpoint,
+                                           "Authorization: Bearer ${access_token}\nAccept: application/json")
+            Some(body) => Ok(body)
+            None       => Err(oautherr.OauthTransport("GET ${p.userinfo_endpoint} got no 2xx reply"))
 
 // The `sub` check on a userinfo response (§ 5.3.4).
 //
@@ -408,4 +501,75 @@ pub fn fetch_userinfo(p: oauthdisc.OauthProvider,
 //                 None    => println("the same end user")
 // ```
 pub fn check_userinfo_sub(userinfo_json: Str, cl: OauthIdClaims) -> ?oautherr.OauthFault []
-    todo("oauth2-nv.oauthoidc.check_userinfo_sub")
+    match json.parse(userinfo_json)
+        None    => Some(oautherr.OauthMalformedResponse("the userinfo response is not JSON"))
+        Some(v) =>
+            match json.get_str(v, "sub")
+                None      => Some(oautherr.OauthMissingField("sub"))
+                Some(sub) =>
+                    if sub == cl.sub
+                        None
+                    else
+                        Some(oautherr.OauthIdTokenRejected("the userinfo sub is not the id_token's sub"))
+
+// ── Private helpers ──────────────────────────────────────────────────
+
+// The algorithms jwt-nv implements, out of names a provider published.
+// The rest (RS512, PS256, EdDSA) are dropped: this package cannot
+// verify them, and admitting one would only turn into an error later.
+fn known_algs(names: [Str]) -> [jwtalg.JwtAlg] []
+    var out: [jwtalg.JwtAlg] = []
+    for n in names
+        match jwtalg.alg_named(n)
+            Some(a) =>
+                out = list.push(out, a)
+            None    => ()
+    out
+
+// What jwt-nv refused, as the fault that names it.
+fn rejection(e: jwterror.JwtError) -> oautherr.OauthFault []
+    match e
+        WrongIssuer(want, got) => oautherr.OauthIssuerMismatch(want, got)
+        _                      => oautherr.OauthIdTokenRejected("${jwterror.code(e)}: ${e.message()}")
+
+// The first check that refused, in order.
+fn first_fault(checks: [?oautherr.OauthFault]) -> ?oautherr.OauthFault []
+    var out: ?oautherr.OauthFault = None
+    for c in checks
+        if out == None
+            out = c
+    out
+
+// `aud` is a string or an array of strings (OpenID Connect Core § 2).
+fn audiences(v: JsonValueH) -> [Str] []
+    match json.get_str(v, "aud")
+        Some(one) => [one]
+        None      => string_list(v, "aud")
+
+// A member that is an array of strings, empty when absent.
+fn string_list(v: JsonValueH, name: Str) -> [Str] []
+    match json.get_list(v, name)
+        None     => []
+        Some(xs) => list.filter(list.map(xs, e => json.to_str(e) ?? ""), s => s != "")
+
+// § 3.1.3.6: the left half of the hash of the ASCII access token,
+// base64url without padding.  Every algorithm jwt-nv implements names
+// SHA-256, so the half is sixteen bytes.
+fn at_hash_value(access_token: Str, alg: jwtalg.JwtAlg) -> Str []
+    let digest = match alg
+        Hs256 => hashing.sha256(bytes.from_str(access_token))
+        Rs256 => hashing.sha256(bytes.from_str(access_token))
+        Es256 => hashing.sha256(bytes.from_str(access_token))
+    base64.encode(bytes.slice(digest, 0, 16), B64UrlSafe, B64Unpadded)
+
+// Equality that takes as long for a near miss as for a far one.
+fn same_text(a: Str, b: Str) -> Bool []
+    if str.len(a) != str.len(b)
+        false
+    else
+        var diff = 0
+        var i = 0
+        while i < str.len(a)
+            diff = diff | (str.byte_at_or(a, i, 0) ^ str.byte_at_or(b, i, 0))
+            i = i + 1
+        diff == 0

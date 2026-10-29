@@ -13,12 +13,6 @@ validation. It is a port of
 [oauth2-rs](https://github.com/ramosbugs/oauth2-rs) and
 [Authlib](https://authlib.org)'s client half.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is
-declared with its full signature, but every body is a `todo()` that
-panics when called. The package is published so its design can be
-reviewed and depended on before it is implemented. Version 0.1.0 will
-be the first working release.
-
 ## What the flows are
 
 Four parties appear in RFC 6749 section 1.1. The **resource owner** is
@@ -108,10 +102,7 @@ generator, and `oauthflow.exchange_code` performs the whole exchange
 over the network. Neither is used above, so this program declares only
 `[io]`.
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: oauth2-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build with `novo pkg build`. The tests are listed at the end of this page.
 
 ## What the package contains
 
@@ -213,7 +204,12 @@ takes the thread** for as long as the person takes.
     `check_at_hash` ties it to the access token that came with it.
 14. **`oauthoidc.validate` is a policy over jwt-nv, never a second
     verifier.** `policy_for` builds the policy from the provider
-    document and the client identifier.
+    document and the client identifier. It verifies the algorithms
+    jwt-nv verifies, which are ES256 and HS256. An identity token signed
+    with RS256, the algorithm OpenID Connect Core section 15.1 makes the
+    default, is refused with a signature error, because jwt-nv does not
+    yet verify RSA signatures. `oauthdisc.read_jwks` still reads RSA
+    keys, so the keys are ready for the day it does.
 15. **Client authentication has two spellings and servers differ.**
     `client_secret_basic` puts the credentials in an `Authorization:
     Basic` header, over the form-urlencoded identifier and secret,
@@ -235,16 +231,24 @@ takes the thread** for as long as the person takes.
 | Function | Row | Why |
 | --- | --- | --- |
 | `oauthflow.new_state`, `new_nonce`, `new_verifier`, `begin` | `[fs, rand]` | The operating system's generator is a device, and reading a device is `[fs]` |
-| Every exchange, and `oauthdisc.fetch` | `[net, async]` | The standard library's HTTP client costs both |
-| `oauthflow.device_wait` | `[net, time, async]` | It is the one function here that sleeps |
-| Everything in `oautherr`, `oauthmsg`, `oauthtoken`, `oauthoidc` | `[]` | Arithmetic over strings the caller holds |
+| `oauthflow.post_form` and every exchange built on it: `exchange_code`, `client_credentials`, `device_begin`, `device_poll`, `refresh`, `ensure_fresh`, `revoke`, `introspect` | `[io, net, time, async]` | The standard library's `HttpClient`, which is the only HTTP client that returns the status and the body of an error reply, costs all four |
+| `oauthflow.device_wait` | `[io, net, time, async]` | It sleeps between polls, and it is the only function here that does |
+| `oauthdisc.fetch`, `fetch_at`, `fetch_jwks`, `oauthoidc.fetch_userinfo` | `[net, async]` | One `http.client.get`, which follows no redirect |
+| Everything else in `oautherr`, `oauthmsg`, `oauthtoken`, `oauthdisc` and `oauthoidc` | `[]` | Arithmetic over strings the caller holds |
 
 The state, the nonce and the verifier exist so that an attacker cannot
 predict them, and the standard library's `rand` module is xoshiro256\*\*,
 which is a shuffle generator. They go through rand-nv's
 `rng.os_bytes` instead, and the `[fs]` is that disclosure.
 `oauthflow.begin_from` is the `[]` twin for a caller bringing its own
-bytes.
+values, and `begin_from_draws` for a caller bringing the bytes.
+
+## Running on a microcontroller
+
+This package is for a host with an operating system. The exchanges use
+the standard library's HTTP client, and the random values are read from
+the operating system's generator, neither of which exists on a
+microcontroller. The registry shows no microcontroller facet for it.
 
 ## What is not included
 
@@ -263,6 +267,10 @@ bytes.
   through `OauthAuthAssertion`. Signing is
   [jwt-nv](https://novo-lang.org/packages/jwt-nv)'s.
 - **DPoP proof generation.** See rule 12. The token type is recognised.
+- **RSA signature verification.** That is jwt-nv's, and see rule 14.
+- **A cache for discovery documents or key sets.** The package holds no
+  clock to expire one with, so `fetch` and `fetch_jwks` fetch every time
+  and the caller decides how long to keep the answer.
 
 Token exchange (RFC 8693) is reachable through the `extra` parameters
 `oauthmsg.authorize_url` and `authorize_params` take.
@@ -297,12 +305,15 @@ Token exchange (RFC 8693) is reachable through the `extra` parameters
 ## Tests
 
 ```bash
-novo test tests/oautherr_tests.nv     # the error codes, retry and back-off
-novo test tests/oauthmsg_tests.nv     # PKCE, the callback, and every request shape
-novo test tests/oauthtoken_tests.nv   # expiry, scopes, and the header
-novo test tests/oauthdisc_tests.nv    # the two well-known URLs and the key set
-novo test tests/oauthoidc_tests.nv    # the identity token's checks
-novo test tests/oauthflow_tests.nv    # the flows, over supplied values
+novo test tests/oautherr_tests.nv          # the error codes, retry and back-off
+novo test tests/oauthmsg_tests.nv          # PKCE, the callback, and every request shape
+novo test tests/oauthtoken_tests.nv        # expiry, scopes, and the header
+novo test tests/oauthdisc_tests.nv         # the two well-known URLs and the provider document
+novo test tests/oauthoidc_tests.nv         # the identity token's checks
+novo test tests/oauthoidc_signed_tests.nv  # signed tokens and key sets, made by OpenSSL
+novo test tests/oauthflow_tests.nv         # the flows' refusals before the network
+novo test tests/oauthnet_tests.nv          # the flows against a local authorization server
+tests/coverage.sh                          # line coverage of src/, merged over every suite
 ```
 
 The normative sources are RFC 6749 sections 4 and 5 for the flows and
@@ -311,57 +322,31 @@ the responses, RFC 7636 for PKCE, RFC 8628 for the device flow, RFC
 OpenID Connect Core 1.0 for the identity token. The reference
 implementations are the Rust crate `oauth2` and Authlib's client half.
 
-No test opens a socket. Every request is a list of pairs and every
-response is a string the test writes out, so the whole of RFC 6749
-sections 4 and 5, RFC 7636 and RFC 8628 is checked with nothing
-running. The suite asserts that a mismatched `state` is refused, that a
-callback with two `state` parameters is unreadable, that a verifier
-outside the grammar is refused before a challenge is computed, that the
-two discovery URLs differ for an issuer with a path, that a provider
-advertising no PKCE methods answers `supports_pkce` false, that an
-absent `expires_in` is not an infinite lifetime, and that a DPoP token
-does not produce a `Bearer` header.
+The reference data is independent of this package:
 
-The tests compile today and fail at run, each on the
-`not implemented: oauth2-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
+- RFC 7636 appendix B gives the PKCE verifier and challenge.
+- RFC 6749 section 2.3.1 gives the Basic credential, and sections 5.1
+  and 5.2 the token responses. RFC 8628 section 3.2 gives the device
+  authorization response.
+- OpenID Connect Core appendix A.3 gives an access token and its
+  `at_hash`.
+- Python's `urllib.parse`, `hashlib`, `base64` and `hmac` produce the
+  exact URLs, request bodies and credentials the suites compare against.
+- Python's `cryptography` package (OpenSSL) makes the P-256 and RSA keys
+  and signs the identity tokens in `tests/oauthoidc_signed_tests.nv`;
+  `tests/generate/gen_oidc.py` writes that file.
+- `tests/double/oauth_double.py` is a small authorization server that the network suite starts on a free port of 127.0.0.1 and that ends itself after ten minutes. It
+  rebuilds the Basic credential and the PKCE challenge itself and refuses
+  a request that carries either one wrongly.
 
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| Every `pub struct` and `pub enum` in the six modules | the types are declared |
-| `oautherr.fault_code`, `.fault_named`, `.fault_description`, `.fault_uri`, `.known_codes` | no |
-| `oautherr.is_retryable`, `.is_pending`, `.poll_delay`, `.needs_user_action` | no |
-| `oautherr.is_configuration_fault`, `.is_client_safe`, `.status_for`, `OauthFault.message` | no |
-| `oauthmsg.client`, `.with_secret`, `.with_scopes`, `.with_pkce`, `.is_confidential` | no |
-| `oauthmsg.pkce_is_weak`, `.pkce_method_name`, `.pkce_challenge`, `.pkce_matches` | no |
-| `oauthmsg.scope_join`, `.scope_split`, `.scope_covers`, `.scope_ok` | no |
-| `oauthmsg.verifier_bytes`, `.state_bytes`, `.verifier_of`, `.verifier_ok` | no |
-| `oauthmsg.pending`, `.with_issuer`, `.started_at`, `.pending_age`, `.pending_redacted` | no |
-| `oauthmsg.authorize_params`, `.authorize_url`, `.endpoint_ok` | no |
-| `oauthmsg.read_callback`, `.read_callback_body`, `.callback_state`, `.check_state` | no |
-| `oauthmsg.code_params`, `.client_credentials_params`, `.device_params`, `.device_token_params` | no |
-| `oauthmsg.refresh_params`, `.revoke_params`, `.introspect_params` | no |
-| `oauthmsg.with_client_auth`, `.auth_header`, `.encode_body` | no |
-| `oauthmsg.read_token_response`, `.fault_of`, `.read_device_response`, `.device_prompt` | no |
-| `oauthtoken.token`, `.token_type_named`, `.token_type_name` | no |
-| `oauthtoken.with_expires_in`, `.with_expires_at`, `.with_refresh` | no |
-| `oauthtoken.has_expiry`, `.is_expired`, `.needs_refresh`, `.seconds_left` | no |
-| `oauthtoken.authorization_header`, `.granted_scopes`, `.has_scope`, `.covers` | no |
-| `oauthtoken.extra`, `.extra_int`, `.redacted` | no |
-| `oauthdisc.openid_url`, `.oauth_url`, `.discovery_urls`, `.read`, `.check_issuer` | no |
-| `oauthdisc.fetch`, `.fetch_at`, `.fetch_jwks`, `.read_jwks`, `.jwks_skipped`, `.key_for` | no |
-| `oauthdisc.supports_pkce`, `.supports_grant`, `.supports_auth_method`, `.missing_for`, `.extra` | no |
-| `oauthoidc.policy_for`, `.policy_algs`, `.validate`, `.claims_of_verified` | no |
-| `oauthoidc.check_nonce`, `.check_azp`, `.at_hash_of`, `.check_at_hash`, `.require_at_hash` | no |
-| `oauthoidc.identity`, `.claim`, `.claim_bool` | no |
-| `oauthoidc.fetch_userinfo`, `.check_userinfo_sub` | no |
-| `oauthflow.new_state`, `.new_nonce`, `.new_verifier`, `.begin`, `.begin_from` | no |
-| `oauthflow.post_form`, `.authorize_url`, `.exchange_code`, `.client_credentials` | no |
-| `oauthflow.device_begin`, `.device_poll`, `.device_wait` | no |
-| `oauthflow.refresh`, `.ensure_fresh`, `.revoke`, `.introspect`, `.is_active` | no |
+The suites assert that a mismatched `state` is refused, that a callback
+with two `state` parameters is unreadable, that a verifier outside the
+grammar is refused before a challenge is computed, that the two discovery
+URLs differ for an issuer with a path, that a provider advertising no
+PKCE methods answers `supports_pkce` false, that an absent `expires_in`
+is not an infinite lifetime, that a DPoP token does not produce a
+`Bearer` header, and that a discovery document for another issuer is
+refused.
 
 ## Licence
 

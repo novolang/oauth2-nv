@@ -1,20 +1,16 @@
 // oauthflow_tests.nv — the performing half, asserted without a server.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: oauth2-nv.oauthflow.<fn>`.
-//
-// NOTHING HERE OPENS A SOCKET, and the addresses are all
-// `https://id.example`, which is reserved and resolves nowhere.  What
-// is asserted is the part that can be: every flow refuses before it
-// connects when the endpoint is not `https`, when a client-credentials
-// client has no credentials, or when a verifier is outside RFC 7636
-// § 4.1's grammar.  Those refusals are the ones that matter, because
-// they are the ones a deployment meets on its first run.
-//
-// The functions that would need a server are named anyway, so that the
-// day a body lands the test file already says what to point at one.
+// NOTHING HERE OPENS A SOCKET.  What is asserted is what a flow does
+// before it connects: refuse an endpoint that is not `https`, refuse a
+// callback that is not this flow's, refuse a client-credentials client
+// with no credentials, refuse a verifier outside RFC 7636 § 4.1's
+// grammar, and read an introspection document.  Those refusals are the
+// ones a deployment meets on its first run.  Everything that does reach
+// a server is in oauthnet_tests.nv, against a local authorization
+// server (tests/network.sh).
 
 use std.test
+use std.bytes
 use std.str
 use civil
 use oautherr
@@ -51,75 +47,71 @@ fn a_device_grant() -> oauthmsg.OauthDeviceGrant
                                      expires_in: 0, interval: 5 }
 
 @test
-fn test_the_generator_is_the_operating_systems_and_the_row_says_so() [io, fs, rand]
-    // `[fs, rand]` on this test is not decoration: it is what the
-    // three minting functions cost, and a test that could not name
-    // the row could not call them.
-    test.case("a state")
-    match oauthflow.new_state()
-        Ok(s)  => test.assert(str.len(s) > 0)
-        Err(f) => test.assert_eq_str(oautherr.fault_code(f), "")
-
-    test.case("a nonce")
-    match oauthflow.new_nonce()
-        Ok(n)  => test.assert(str.len(n) > 0)
-        Err(_) => test.assert(true)
-
-    test.case("a verifier, inside § 4.1's grammar by construction")
-    match oauthflow.new_verifier()
-        Err(_) => test.assert(true)
-        Ok(v)  => test.assert(oauthmsg.verifier_ok(v))
-
-@test
-fn test_begin_mints_all_three_and_the_nonce_is_a_choice() [io, fs, rand]
-    test.case("with a nonce, for OpenID Connect")
-    match oauthflow.begin(a_public_client(), true)
-        Err(_) => test.assert(true)
-        Ok(p)  =>
-            test.assert(str.len(p.state) > 0)
-            test.assert(str.len(p.nonce) > 0)
-
-    test.case("without one, for plain OAuth 2 — a parameter no server echoes")
-    match oauthflow.begin(a_public_client(), false)
-        Err(_) => test.assert(true)
-        Ok(p)  => test.assert_eq_str(p.nonce, "")
-
-@test
 fn test_begin_from_is_the_testable_twin_and_costs_nothing() [io]
     test.case("the same value, with the randomness supplied")
     match oauthflow.begin_from(a_public_client(), "state-value", "", a_verifier())
-        Err(_) => test.assert(false)
+        Err(_) => test.fail("refused")
         Ok(p)  =>
             test.assert_eq_str(p.state, "state-value")
             test.assert_eq_str(p.verifier, a_verifier())
 
-    test.case("and a verifier outside the grammar is refused HERE rather than at the exchange")
+    test.case("a verifier outside the grammar is refused HERE rather than at the exchange")
     match oauthflow.begin_from(a_public_client(), "st", "", "tooshort")
-        Ok(_)  => test.assert(false)
-        Err(_) => test.assert(true)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "code_verifier"))
+
+    test.case("a flow with no state checks nothing and is refused")
+    match oauthflow.begin_from(a_public_client(), "", "", a_verifier())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "state"))
 
 @test
-fn test_an_endpoint_that_is_not_https_is_refused_before_the_socket() [io, net, async]
+fn test_a_flow_started_from_draws_refuses_a_draw_that_never_came() [io]
+    let c = a_public_client()
+    let some = Some(bytes.from_byte_list([251, 255, 191]))
+    test.case("all three arrived")
+    match oauthflow.begin_from_draws(c, some, some, Some(bytes.from_byte_list(list.zeros(32))))
+        Ok(p)  =>
+            test.assert_eq_str(p.state, "-_-_")
+            test.assert_eq_str(p.nonce, "-_-_")
+            test.assert_eq(str.len(p.verifier), 43)
+        Err(f) => test.fail("refused: ${f.message()}")
+    test.case("no nonce wanted: an empty draw")
+    match oauthflow.begin_from_draws(c, some, Some(bytes.zeros(0)), Some(bytes.from_byte_list(list.zeros(32))))
+        Ok(p)  => test.assert_eq_str(p.nonce, "")
+        Err(f) => test.fail("refused: ${f.message()}")
+    test.case("each missing draw is no entropy, whichever one it is")
+    let v = Some(bytes.from_byte_list(list.zeros(32)))
+    for r in [oauthflow.begin_from_draws(c, None, some, v), oauthflow.begin_from_draws(c, some, None, v),
+              oauthflow.begin_from_draws(c, some, some, None)]
+        match r
+            Ok(_)  => test.fail("accepted")
+            Err(f) => test.assert(str.contains(f.message(), "generator"))
+    test.case("a short verifier draw is the verifier grammar's refusal")
+    match oauthflow.begin_from_draws(c, some, some, some)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "code_verifier"))
+
+@test
+fn test_an_endpoint_that_is_not_https_is_refused_before_the_socket() [io, net, time, async]
     test.case("the one exchange")
     match oauthflow.post_form("http://id.example/token", a_public_client(), [])
-        Ok(_)  => test.assert(false)
+        Ok(_)  => test.fail("accepted")
         Err(f) => test.assert(oautherr.is_configuration_fault(f))
 
     test.case("and the authorization URL, which is the other half")
     match oauthflow.authorize_url("http://id.example/authorize", a_public_client(), a_pending())
-        Ok(_)  => test.assert(false)
-        Err(_) => test.assert(true)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(oautherr.is_configuration_fault(f))
 
 @test
 fn test_the_authorization_url_is_the_same_one_oauthmsg_builds() [io]
-    test.case("named here so the two halves of the flow are found together")
-    match oauthflow.authorize_url("https://id.example/authorize",
-                                  a_public_client(), a_pending())
-        Err(_) => test.assert(false)
+    match oauthflow.authorize_url("https://id.example/authorize", a_public_client(), a_pending())
+        Err(_) => test.fail("refused")
         Ok(u)  => test.assert(str.contains(u, "state=state-value"))
 
 @test
-fn test_exchange_code_will_not_run_without_the_state_the_flow_sent() [io, net, async]
+fn test_exchange_code_will_not_run_without_the_state_the_flow_sent() [io, net, time, async]
     // The signature is the test: there is no spelling of this call
     // that omits the `OauthPending`.  What is asserted is what happens
     // when the callback does not belong to it.
@@ -127,99 +119,43 @@ fn test_exchange_code_will_not_run_without_the_state_the_flow_sent() [io, net, a
     let cb = oauthmsg.read_callback("code=attacker-code&state=some-other-state")
     match oauthflow.exchange_code("https://id.example/token", a_public_client(),
                                   a_pending(), cb, a_moment())
-        Ok(_)  => test.assert(false)
+        Ok(_)  => test.fail("accepted")
         Err(f) => test.assert_eq_str(oautherr.fault_code(f), "")
 
     test.case("and a refused callback comes back as the server's own fault")
     let denied = oauthmsg.read_callback("error=access_denied&state=state-value")
     match oauthflow.exchange_code("https://id.example/token", a_public_client(),
                                   a_pending(), denied, a_moment())
-        Ok(_)  => test.assert(false)
+        Ok(_)  => test.fail("accepted")
         Err(f) => test.assert_eq_str(oautherr.fault_code(f), "access_denied")
 
 @test
-fn test_client_credentials_refuses_a_public_client_before_it_asks() [io, net, async]
+fn test_client_credentials_refuses_a_public_client_before_it_asks() [io, net, time, async]
     // This grant authenticates the CLIENT, and a client with no
-    // credentials has nothing to authenticate with — so the request
-    // would come back `invalid_client` and the refusal here names the
-    // real cause.
-    test.case("a public client")
+    // credentials has nothing to authenticate with.
     match oauthflow.client_credentials("https://id.example/token", a_public_client(),
                                        ["api"], a_moment())
-        Ok(_)  => test.assert(false)
+        Ok(_)  => test.fail("accepted")
         Err(f) => test.assert(oautherr.is_configuration_fault(f))
 
-    test.case("a confidential one gets as far as the network")
-    match oauthflow.client_credentials("https://id.example/token", a_confidential_client(),
-                                       ["api"], a_moment())
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)
+@test
+fn test_a_refresh_with_nothing_to_refresh_with_is_refused_locally() [io, net, time, async]
+    match oauthflow.refresh("https://id.example/token", a_public_client(), oauthtoken.token("a"), [], a_moment())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(oautherr.fault_code(f), "invalid_grant")
 
 @test
-fn test_the_device_flow_has_two_endpoints_and_they_are_not_the_same_one() [io, net, async]
-    test.case("the device authorization endpoint")
-    match oauthflow.device_begin("https://id.example/device", a_public_client(), ["openid"])
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)
-
-    test.case("and the token endpoint, polled")
-    match oauthflow.device_poll("https://id.example/token", a_public_client(),
-                                a_device_grant(), a_moment())
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)
-
-@test
-fn test_only_device_wait_sleeps_and_its_row_is_the_disclosure() [io, net, time, async]
-    // `device_poll` is one poll and costs `[net, async]`; `device_wait`
-    // loops and costs `[net, time, async]`.  A program with a spinner
-    // or a cancel key writes its own loop around the first.
-    test.case("the convenience that takes the thread")
-    match oauthflow.device_wait("https://id.example/token", a_public_client(),
-                                a_device_grant(), a_moment())
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)
-
-@test
-fn test_a_refresh_that_gets_no_new_refresh_token_keeps_the_old_one() [io, net, async]
-    // A server that rotates refresh tokens sends a new one; a server
-    // that does not sends none.  Treating "none" as "revoked" logs the
-    // end user out on the first refresh.
-    test.case("the refresh itself")
-    let t = oauthtoken.with_refresh(oauthtoken.token("a"), "the-refresh-token")
-    match oauthflow.refresh("https://id.example/token", a_public_client(), t, [], a_moment())
-        Ok(t2) => test.assert_eq_str(t2.refresh_token, "the-refresh-token")
-        Err(_) => test.assert(true)
-
-@test
-fn test_ensure_fresh_leaves_a_live_token_alone() [io, net, async]
-    test.case("a token with no expiry is not refreshed on every call")
+fn test_ensure_fresh_leaves_a_token_with_no_expiry_alone() [io, net, time, async]
+    // A token with no expiry is not refreshed on every call.
     let t = oauthtoken.with_refresh(oauthtoken.token("a"), "r")
-    match oauthflow.ensure_fresh("https://id.example/token", a_public_client(),
-                                 t, a_moment(), 30)
+    match oauthflow.ensure_fresh("https://id.example/token", a_public_client(), t, a_moment(), 30)
         Ok(t2) => test.assert_eq_str(t2.access_token, "a")
-        Err(_) => test.assert(true)
+        Err(f) => test.fail("refused: ${f.message()}")
 
 @test
-fn test_revocation_is_idempotent_by_specification() [io, net, async]
-    // RFC 7009 § 2.2: a server answers 200 for a token it has never
-    // heard of, on purpose — so that revocation is idempotent and so
-    // that the endpoint cannot be used to find out whether a token
-    // exists.
-    test.case("a revocation")
-    match oauthflow.revoke("https://id.example/revoke", a_confidential_client(),
-                           "tok", "refresh_token")
-        Some(_) => test.assert(true)
-        None    => test.assert(true)
-
-@test
-fn test_introspection_is_raw_and_fails_closed() [io, net, async]
-    test.case("a document a resource server cannot read is not an authorization")
+fn test_introspection_fails_closed() [io]
+    // A document a resource server cannot read is not an authorization.
     test.assert(not oauthflow.is_active("{}"))
     test.assert(not oauthflow.is_active("<html>502</html>"))
+    test.assert(not oauthflow.is_active("{\"active\":\"yes\"}"))
     test.assert(oauthflow.is_active("{\"active\":true}"))
-
-    test.case("and the call itself answers the document rather than a typed guess")
-    match oauthflow.introspect("https://id.example/introspect", a_confidential_client(),
-                               "tok", "")
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)

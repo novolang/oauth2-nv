@@ -1,8 +1,6 @@
 // oauthdisc.nv — where an authorization server says what it is, and
 // the JWKS whose keys sign what it issues.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // TWO `.well-known` PATHS, AND THEY ARE NOT THE SAME URL.  This is the
 // part of discovery that is quietly wrong in most clients.
 //
@@ -36,8 +34,16 @@
 // package holds no cache and has no clock to expire one with, so the
 // caching is the caller's and the shape of it is theirs to choose.
 
+use std.bytes
+use std.json
+use std.list
+use std.str
+use base64
+use href
 use jwtalg
 use oautherr
+use oauthmsg
+use p256
 
 // What an authorization server says about itself
 // (RFC 8414 § 2, OpenID Connect Discovery 1.0 § 3).
@@ -118,7 +124,9 @@ pub struct OauthProvider
 //         Err(_) => println("not an issuer")
 // ```
 pub fn openid_url(issuer: Str) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthdisc.openid_url")
+    match issuer_parts(issuer)
+        Err(f)    => Err(f)
+        Ok(parts) => Ok(openid_of(parts))
 
 // The RFC 8414 discovery URL for an issuer:
 // `/.well-known/oauth-authorization-server` INSERTED between the host
@@ -138,7 +146,9 @@ pub fn openid_url(issuer: Str) -> Result<Str, oautherr.OauthFault> []
 //         Err(_) => println("not an issuer")
 // ```
 pub fn oauth_url(issuer: Str) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthdisc.oauth_url")
+    match issuer_parts(issuer)
+        Err(f)    => Err(f)
+        Ok(parts) => Ok(oauth_of(parts))
 
 // Both discovery URLs for an issuer, in the order `fetch` tries them.
 //
@@ -153,7 +163,9 @@ pub fn oauth_url(issuer: Str) -> Result<Str, oautherr.OauthFault> []
 //     println("${list.len(oauthdisc.discovery_urls("https://id.example"))}")
 // ```
 pub fn discovery_urls(issuer: Str) -> [Str] []
-    todo("oauth2-nv.oauthdisc.discovery_urls")
+    match issuer_parts(issuer)
+        Err(_)    => []
+        Ok(parts) => [openid_of(parts), oauth_of(parts)]
 
 // Parse a discovery document.
 //
@@ -173,7 +185,35 @@ pub fn discovery_urls(issuer: Str) -> [Str] []
 //         Err(_) => println("not a discovery document")
 // ```
 pub fn read(body: Str) -> Result<OauthProvider, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthdisc.read")
+    match json.parse(body)
+        None    => Err(oautherr.OauthMalformedResponse("the discovery document is not JSON"))
+        Some(v) =>
+            if json.type_of(v) != "object"
+                Err(oautherr.OauthMalformedResponse("the discovery document is not a JSON object"))
+            else
+                match json.get_str(v, "issuer")
+                    None         => Err(oautherr.OauthMissingField("issuer"))
+                    Some(issuer) =>
+                        Ok(OauthProvider {
+                            issuer: issuer,
+                            authorization_endpoint: json.get_str(v, "authorization_endpoint") ?? "",
+                            token_endpoint: json.get_str(v, "token_endpoint") ?? "",
+                            device_authorization_endpoint: json.get_str(v, "device_authorization_endpoint") ?? "",
+                            userinfo_endpoint: json.get_str(v, "userinfo_endpoint") ?? "",
+                            jwks_uri: json.get_str(v, "jwks_uri") ?? "",
+                            revocation_endpoint: json.get_str(v, "revocation_endpoint") ?? "",
+                            introspection_endpoint: json.get_str(v, "introspection_endpoint") ?? "",
+                            end_session_endpoint: json.get_str(v, "end_session_endpoint") ?? "",
+                            registration_endpoint: json.get_str(v, "registration_endpoint") ?? "",
+                            scopes_supported: strings(v, "scopes_supported"),
+                            response_types_supported: strings(v, "response_types_supported"),
+                            response_modes_supported: strings(v, "response_modes_supported"),
+                            grant_types_supported: strings(v, "grant_types_supported"),
+                            code_challenge_methods_supported: strings(v, "code_challenge_methods_supported"),
+                            token_endpoint_auth_methods_supported: strings(v, "token_endpoint_auth_methods_supported"),
+                            id_token_signing_alg_values_supported: strings(v, "id_token_signing_alg_values_supported"),
+                            subject_types_supported: strings(v, "subject_types_supported"),
+                            raw_json: body })
 
 // Whether a document's `issuer` is the one it was fetched from
 // (OpenID Connect Discovery 1.0 § 4.3).
@@ -195,7 +235,10 @@ pub fn read(body: Str) -> Result<OauthProvider, oautherr.OauthFault> []
 //                 None    => println("matches")
 // ```
 pub fn check_issuer(p: OauthProvider, issuer: Str) -> ?oautherr.OauthFault []
-    todo("oauth2-nv.oauthdisc.check_issuer")
+    if p.issuer == issuer
+        None
+    else
+        Some(oautherr.OauthIssuerMismatch(issuer, p.issuer))
 
 // Fetch and check a discovery document for an issuer.
 //
@@ -213,7 +256,21 @@ pub fn check_issuer(p: OauthProvider, issuer: Str) -> ?oautherr.OauthFault []
 //         Err(_) => println("no usable discovery document")
 // ```
 pub fn fetch(issuer: Str) -> Result<OauthProvider, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthdisc.fetch")
+    match issuer_parts(issuer)
+        Err(f)    => Err(f)
+        Ok(parts) =>
+            match fetch_at(openid_of(parts), issuer)
+                Ok(p)  => Ok(p)
+                Err(f) =>
+                    if is_mismatch(f)
+                        Err(f)
+                    else
+                        match fetch_at(oauth_of(parts), issuer)
+                            Ok(p)  => Ok(p)
+                            Err(g) => if is_mismatch(g)
+                                Err(g)
+                            else
+                                Err(f)
 
 // Fetch a document from an exact URL, and check its `issuer` against
 // the issuer the caller expects.
@@ -232,7 +289,15 @@ pub fn fetch(issuer: Str) -> Result<OauthProvider, oautherr.OauthFault> [net, as
 // ```
 pub fn fetch_at(url: Str,
                 expect_issuer: Str) -> Result<OauthProvider, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthdisc.fetch_at")
+    match get_text(url)
+        Err(f)   => Err(f)
+        Ok(body) =>
+            match read(body)
+                Err(f) => Err(f)
+                Ok(p)  =>
+                    match check_issuer(p, expect_issuer)
+                        Some(f) => Err(f)
+                        None    => Ok(p)
 
 // Whether the server said it supports PKCE with `S256`.
 //
@@ -251,7 +316,7 @@ pub fn fetch_at(url: Str,
 //         Ok(p)  => println("${oauthdisc.supports_pkce(p)}")
 // ```
 pub fn supports_pkce(p: OauthProvider) -> Bool []
-    todo("oauth2-nv.oauthdisc.supports_pkce")
+    list.contains(p.code_challenge_methods_supported, "S256")
 
 // Whether the server named a grant type.
 //
@@ -269,7 +334,10 @@ pub fn supports_pkce(p: OauthProvider) -> Bool []
 //         Ok(p)  => println("${oauthdisc.supports_grant(p, "refresh_token")}")
 // ```
 pub fn supports_grant(p: OauthProvider, grant_type: Str) -> Bool []
-    todo("oauth2-nv.oauthdisc.supports_grant")
+    if list.len(p.grant_types_supported) == 0
+        grant_type == "authorization_code" or grant_type == "implicit"
+    else
+        list.contains(p.grant_types_supported, grant_type)
 
 // Whether the server named a client authentication method.
 //
@@ -285,7 +353,10 @@ pub fn supports_grant(p: OauthProvider, grant_type: Str) -> Bool []
 //         Ok(p)  => println("${oauthdisc.supports_auth_method(p, "client_secret_post")}")
 // ```
 pub fn supports_auth_method(p: OauthProvider, method: Str) -> Bool []
-    todo("oauth2-nv.oauthdisc.supports_auth_method")
+    if list.len(p.token_endpoint_auth_methods_supported) == 0
+        method == "client_secret_basic"
+    else
+        list.contains(p.token_endpoint_auth_methods_supported, method)
 
 // The members a named flow needs that this document does not carry.
 //
@@ -305,7 +376,21 @@ pub fn supports_auth_method(p: OauthProvider, method: Str) -> Bool []
 //         Ok(p)  => println("${list.len(oauthdisc.missing_for(p, "device_code"))}")
 // ```
 pub fn missing_for(p: OauthProvider, flow: Str) -> [Str] []
-    todo("oauth2-nv.oauthdisc.missing_for")
+    var need: [(Str, Str)] = []
+    if flow == "authorization_code"
+        need = [("authorization_endpoint", p.authorization_endpoint), ("token_endpoint", p.token_endpoint)]
+    else if flow == "client_credentials" or flow == "refresh_token"
+        need = [("token_endpoint", p.token_endpoint)]
+    else if flow == "device_code"
+        need = [("device_authorization_endpoint", p.device_authorization_endpoint),
+                ("token_endpoint", p.token_endpoint)]
+    else
+        return ["flow '${flow}' (authorization_code, client_credentials, device_code and refresh_token are the flows this package knows)"]
+    var out: [Str] = []
+    for n in need
+        if n.1 == ""
+            out = list.push(out, n.0)
+    out
 
 // A member of the document this struct does not model.
 //
@@ -321,7 +406,9 @@ pub fn missing_for(p: OauthProvider, flow: Str) -> [Str] []
 //                 None    => println("absent")
 // ```
 pub fn extra(p: OauthProvider, member: Str) -> ?Str []
-    todo("oauth2-nv.oauthdisc.extra")
+    match json.parse(p.raw_json)
+        None    => None
+        Some(v) => json.get_str(v, member)
 
 // ── The keys ─────────────────────────────────────────────────────────
 
@@ -343,7 +430,10 @@ pub fn extra(p: OauthProvider, member: Str) -> ?Str []
 //                 Err(_)  => println("no keys")
 // ```
 pub fn fetch_jwks(p: OauthProvider) -> Result<Str, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthdisc.fetch_jwks")
+    if p.jwks_uri == ""
+        Err(oautherr.OauthDiscoveryIncomplete("jwks_uri"))
+    else
+        get_text(p.jwks_uri)
 
 // A JWKS document as jwt-nv verifying keys (RFC 7517 § 5).
 //
@@ -366,7 +456,9 @@ pub fn fetch_jwks(p: OauthProvider) -> Result<Str, oautherr.OauthFault> [net, as
 //         Err(_) => println("not a JWKS")
 // ```
 pub fn read_jwks(body: Str) -> Result<[jwtalg.JwtVerifyingKey], oautherr.OauthFault> []
-    todo("oauth2-nv.oauthdisc.read_jwks")
+    match scan_jwks(body)
+        Err(f)   => Err(f)
+        Ok(scan) => Ok(scan.keys[:])
 
 // The members of a JWKS this package could not read, as a list of
 // `kid`s and why.
@@ -384,7 +476,9 @@ pub fn read_jwks(body: Str) -> Result<[jwtalg.JwtVerifyingKey], oautherr.OauthFa
 //     println("${list.len(oauthdisc.jwks_skipped("{\"keys\":[]}"))}")
 // ```
 pub fn jwks_skipped(body: Str) -> [Str] []
-    todo("oauth2-nv.oauthdisc.jwks_skipped")
+    match scan_jwks(body)
+        Err(_)   => []
+        Ok(scan) => scan.skipped[:]
 
 // The key with a given `kid`, or `None`.
 //
@@ -404,4 +498,166 @@ pub fn jwks_skipped(body: Str) -> [Str] []
 //                 None    => println("no such key")
 // ```
 pub fn key_for(keys: [jwtalg.JwtVerifyingKey], kid: Str) -> ?jwtalg.JwtVerifyingKey []
-    todo("oauth2-nv.oauthdisc.key_for")
+    jwtalg.key_for_kid(keys, kid)
+
+// ── Private helpers ──────────────────────────────────────────────────
+
+// Whether a fault is the issuer check refusing a document, which is a
+// final answer and not a reason to try the next address.
+fn is_mismatch(f: oautherr.OauthFault) -> Bool []
+    match f
+        OauthIssuerMismatch(_, _) => true
+        _                         => false
+
+// An issuer split into parts, or refused: it must be an address an
+// exchange may use and carry neither a query nor a fragment
+// (OpenID Connect Discovery 1.0 § 3, RFC 8414 § 2).
+fn issuer_parts(issuer: Str) -> Result<href.UrlParts, oautherr.OauthFault> []
+    match href.parse_parts(issuer)
+        Err(_)    => Err(oautherr.OauthInsecureEndpoint(issuer))
+        Ok(parts) =>
+            if not oauthmsg.endpoint_ok(issuer)
+                Err(oautherr.OauthInsecureEndpoint(issuer))
+            else if parts.query != None or parts.fragment != None
+                Err(oautherr.OauthIssuerMismatch(issuer, "an issuer with no query and no fragment"))
+            else
+                Ok(parts)
+
+// An issuer's path without its terminating slash.
+fn trimmed_path(path: Str) -> Str []
+    if str.ends_with(path, "/")
+        str.slice(path, 0, str.len(path) - 1)
+    else
+        path
+
+fn with_path(p: href.UrlParts, path: Str) -> href.UrlParts []
+    UrlParts { scheme: p.scheme, username: p.username, password: p.password, host: p.host,
+               has_authority: p.has_authority, port: p.port, path: path, query: None,
+               fragment: None }
+
+// A member that is an array of strings, empty when absent.
+fn strings(v: JsonValueH, name: Str) -> [Str] []
+    match json.get_list(v, name)
+        None     => []
+        Some(xs) => list.filter(list.map(xs, e => json.to_str(e) ?? ""), s => s != "")
+
+// GET a document: its body on a 2xx, a transport fault otherwise.  One
+// request, no redirect followed.
+fn get_text(url: Str) -> Result<Str, oautherr.OauthFault> [net, async]
+    if not oauthmsg.endpoint_ok(url)
+        Err(oautherr.OauthInsecureEndpoint(url))
+    else
+        match http.client.get(url)
+            Some(body) => Ok(body)
+            None       => Err(oautherr.OauthTransport("GET ${url} got no 2xx reply"))
+
+// What `scan_jwks` answers: the keys read and a line for each one not.
+struct JwksScan
+    keys: [jwtalg.JwtVerifyingKey]
+    skipped: [Str]
+
+fn scan_jwks(body: Str) -> Result<JwksScan, oautherr.OauthFault> []
+    match json.parse(body)
+        None    => Err(oautherr.OauthMalformedResponse("the key set is not JSON"))
+        Some(v) =>
+            match json.get_list(v, "keys")
+                None     => Err(oautherr.OauthMalformedResponse("the key set has no 'keys' array"))
+                Some(xs) =>
+                    var keys: [jwtalg.JwtVerifyingKey] = []
+                    var skipped: [Str] = []
+                    for k in xs
+                        let kid = json.get_str(k, "kid") ?? ""
+                        let label = if kid == ""
+                            "(no kid)"
+                        else
+                            kid
+                        match read_key(k, kid)
+                            Ok(key)  =>
+                                keys = list.push(keys, key)
+                            Err(why) =>
+                                skipped = list.push(skipped, "${label}: ${why}")
+                    Ok(JwksScan { keys: keys, skipped: skipped })
+
+// One JWK as a verifying key, or the reason it is not one.
+fn read_key(k: JsonValueH, kid: Str) -> Result<jwtalg.JwtVerifyingKey, Str> []
+    let kty = json.get_str(k, "kty") ?? ""
+    let usage = json.get_str(k, "use") ?? "sig"
+    if kid == ""
+        Err("a key with no kid cannot be selected")
+    else if usage != "sig"
+        Err("the key is for '${usage}', not for signatures")
+    else if kty == "EC"
+        read_ec(k, kid)
+    else if kty == "RSA"
+        read_rsa(k, kid)
+    else
+        Err("the key type '${kty}' is not supported")
+
+fn read_ec(k: JsonValueH, kid: Str) -> Result<jwtalg.JwtVerifyingKey, Str> []
+    let crv = json.get_str(k, "crv") ?? ""
+    if crv != "P-256"
+        Err("the curve '${crv}' is not supported, only P-256")
+    else
+        match (b64url(k, "x"), b64url(k, "y"))
+            (Some(x), Some(y)) =>
+                match p256.public_key_from_bytes(bytes.to_byte_list(x), bytes.to_byte_list(y))
+                    Err(e)    => Err(e.message())
+                    Ok(point) =>
+                        match p256.validate(point)
+                            Some(e) => Err(e.message())
+                            None    => Ok(jwtalg.with_kid(jwtalg.ec_verifying_key(point), kid))
+            _                  => Err("x and y are not base64url")
+
+fn read_rsa(k: JsonValueH, kid: Str) -> Result<jwtalg.JwtVerifyingKey, Str> []
+    match (b64url(k, "n"), b64url(k, "e"))
+        (Some(n), Some(e)) =>
+            if bytes.len(n) == 0 or bytes.len(e) == 0
+                Err("n and e must not be empty")
+            else
+                Ok(jwtalg.with_kid(jwtalg.rsa_verifying_key(rsa_public_key_der(bytes.to_byte_list(n), bytes.to_byte_list(e))),
+                    kid))
+        _                  => Err("n and e are not base64url")
+
+// A JWK member that is base64url, decoded.
+fn b64url(k: JsonValueH, name: Str) -> ?Bytes []
+    match json.get_str(k, name)
+        None    => None
+        Some(s) =>
+            match base64.decode(s, B64UrlSafe)
+                Ok(b)  => Some(b)
+                Err(_) => None
+
+// RFC 8017 appendix A.1.1: RSAPublicKey ::= SEQUENCE { n INTEGER, e INTEGER },
+// the PKCS#1 DER jwt-nv's RSA key takes.
+fn rsa_public_key_der(n: [Int], e: [Int]) -> Bytes []
+    let body = list.concat(der_integer(n), der_integer(e))
+    bytes.from_byte_list(list.concat(list.concat([48], der_length(list.len(body))), body))
+
+fn der_length(n: Int) -> [Int] []
+    if n < 128
+        [n]
+    else if n < 256
+        [129, n]
+    else
+        [130, n >> 8, n & 255]
+
+// A non-negative big-endian integer as a DER INTEGER: leading zero
+// bytes dropped, one zero added back where the top bit is set.
+fn der_integer(raw: [Int]) -> [Int] []
+    var start = 0
+    while start < list.len(raw) - 1 and raw[start] == 0
+        start = start + 1
+    let digits = list.drop(raw, start)
+    let padded = if digits[0] >= 128
+        list.concat([0], digits)
+    else
+        digits
+    list.concat(list.concat([2], der_length(list.len(padded))), padded)
+
+// The OpenID Connect address: the path with the well-known suffix appended.
+fn openid_of(parts: href.UrlParts) -> Str []
+    href.serialize(with_path(parts, "${trimmed_path(parts.path)}/.well-known/openid-configuration"))
+
+// The RFC 8414 address: the well-known segment inserted before the path.
+fn oauth_of(parts: href.UrlParts) -> Str []
+    href.serialize(with_path(parts, "/.well-known/oauth-authorization-server${trimmed_path(parts.path)}"))

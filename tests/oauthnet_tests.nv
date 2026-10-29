@@ -1,0 +1,389 @@
+// oauthnet_tests.nv — the functions that open a socket, against a local
+// authorization server.
+//
+// The first test starts tests/double/oauth_double.py through
+// tests/double/start.sh, on an ephemeral port of 127.0.0.1, unless
+// OAUTH_DOUBLE already names a server.  The double is Python, and the things it checks on the
+// wire are its own computation: it rebuilds the Basic credential with
+// `urllib.parse.quote_plus` and `base64`, and the PKCE challenge with
+// `hashlib`, so a client that encodes either one wrongly is refused by
+// something that is not this package.
+//
+// Run these tests from the package directory.
+
+use std.test
+use std.env
+use std.process
+use std.str
+use civil
+use oautherr
+use oauthdisc
+use oauthflow
+use oauthmsg
+use oauthoidc
+use oauthtoken
+
+fn double() -> Str [io]
+    let named = env.get("OAUTH_DOUBLE") ?? ""
+    if named != ""
+        named
+    else
+        start_double()
+
+// Start the server and remember its address for the tests that follow.
+// A failed start answers a string that is not an address, so the first
+// request fails with it in the message; a `panic` here would leak the
+// process result (the bug filed as
+// a-branch-that-panics-leaks-the-values-the-other-branch-uses).
+fn start_double() -> Str [io]
+    let (text, status) = process.run("sh tests/double/start.sh")
+    if status != 0
+        "the test authorization server did not start"
+    else
+        let url = str.trim(text)
+        process.env_set("OAUTH_DOUBLE", url)
+        url
+
+fn at() -> civil.CivilDateTime []
+    civil.datetime(civil.date_from_epoch_day(20707), civil.midnight())
+
+fn verifier() -> Str []
+    "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+fn confidential(how: oauthmsg.OauthClientAuth) -> oauthmsg.OauthClient []
+    oauthmsg.with_secret(oauthmsg.client("my-client", "https://client.example.com/cb"), "s+cr&t", how)
+
+fn public_client() -> oauthmsg.OauthClient []
+    oauthmsg.client("public-cli", "")
+
+fn pending_for(c: oauthmsg.OauthClient) -> oauthmsg.OauthPending []
+    oauthmsg.pending(c, "xyz", "", verifier())
+
+fn code_cb(code: Str) -> oauthmsg.OauthCallback []
+    oauthmsg.read_callback("code=${code}&state=xyz")
+
+fn code_of(f: oautherr.OauthFault) -> Str []
+    oautherr.fault_code(f)
+
+// ── Discovery ────────────────────────────────────────────────────────
+
+@test
+fn test_discovery_finds_the_document_and_checks_its_issuer() [io, net, time, async]
+    let b = double()
+    test.case("the OpenID Connect address")
+    match oauthdisc.fetch(b)
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(p)  =>
+            test.assert_eq_str(p.issuer, b)
+            test.assert_eq_str(p.token_endpoint, "${b}/token")
+            test.assert(oauthdisc.supports_pkce(p))
+
+    test.case("a tenant issuer falls through to the RFC 8414 address")
+    match oauthdisc.fetch("${b}/tenant")
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(p)  => test.assert_eq_str(p.issuer, "${b}/tenant")
+
+    test.case("a document for another issuer is final, not a reason to try the next address")
+    match oauthdisc.fetch("${b}/evil")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "refused the issuer"))
+
+    test.case("the second address answering for another issuer is final too")
+    match oauthdisc.fetch("${b}/skew")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "refused the issuer"))
+
+    test.case("nothing at either address is a transport fault, the first one's")
+    match oauthdisc.fetch("${b}/gone")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "openid-configuration"))
+
+    test.case("an issuer this client would not talk to never reaches the network")
+    match oauthdisc.fetch("http://id.example")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "not https"))
+
+@test
+fn test_discovery_at_an_exact_address_and_the_key_set() [io, net, time, async]
+    let b = double()
+    match oauthdisc.fetch_at("${b}/mirror/oidc.json", b)
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(p)  =>
+            test.assert_eq_str(p.jwks_uri, "${b}/jwks")
+            match oauthdisc.fetch_jwks(p)
+                Err(f)  => test.fail("refused: ${f.message()}")
+                Ok(doc) => test.assert_eq_str(doc, "{\"keys\":[]}")
+
+    test.case("the issuer check still applies")
+    match oauthdisc.fetch_at("${b}/mirror/oidc.json", "https://other.example")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "other.example"))
+
+    test.case("a redirect is not followed")
+    match oauthdisc.fetch_at("${b}/redirect", b)
+        Ok(_)  => test.fail("followed")
+        Err(f) => test.assert(str.contains(f.message(), "no 2xx"))
+
+    test.case("a document that is not discovery, an insecure address, a provider with no jwks_uri")
+    match oauthdisc.fetch_at("${b}/jwks", b)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "issuer"))
+    match oauthdisc.fetch_at("http://id.example/x", b)
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "not https"))
+    match oauthdisc.read("{\"issuer\":\"i\"}")
+        Err(_) => test.fail("refused")
+        Ok(p)  =>
+            match oauthdisc.fetch_jwks(p)
+                Ok(_)  => test.fail("fetched")
+                Err(f) => test.assert(str.contains(f.message(), "jwks_uri"))
+
+@test
+fn test_userinfo_is_fetched_with_the_bearer_token() [io, net, time, async]
+    let b = double()
+    match oauthdisc.fetch(b)
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(p)  =>
+            match oauthoidc.fetch_userinfo(p, "good-token")
+                Err(f)   => test.fail("refused: ${f.message()}")
+                Ok(body) => test.assert(str.contains(body, "248289761001"))
+            match oauthoidc.fetch_userinfo(p, "bad-token")
+                Ok(_)  => test.fail("fetched")
+                Err(f) => test.assert(str.contains(f.message(), "no 2xx"))
+
+// ── The one exchange ─────────────────────────────────────────────────
+
+@test
+fn test_post_form_reads_the_error_documents_and_refuses_what_it_should() [io, net, time, async]
+    let b = double()
+    let c = confidential(oauthmsg.OauthAuthBasic)
+    test.case("a 5xx with an HTML body is a retryable server error")
+    match oauthflow.post_form("${b}/boom", c, [("x", "y")])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(oautherr.is_retryable(f))
+    test.case("a redirect to the token endpoint is not followed with the credentials")
+    match oauthflow.post_form("${b}/redirect-post", c, [("x", "y")])
+        Ok(_)  => test.fail("followed")
+        Err(f) => test.assert(str.contains(f.message(), "307"))
+    test.case("nothing listening")
+    match oauthflow.post_form("http://127.0.0.1:1/token", c, [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(oautherr.is_retryable(f))
+    test.case("an endpoint over plain http to a public host never reaches the network")
+    match oauthflow.post_form("http://id.example/token", c, [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(oautherr.is_configuration_fault(f))
+    test.case("a server that does not know the grant answers the RFC's code")
+    match oauthflow.post_form("${b}/token", c, [("grant_type", "password")])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "unsupported_grant_type")
+
+// ── Authorization code ───────────────────────────────────────────────
+
+@test
+fn test_the_code_exchange_works_with_both_ways_of_presenting_a_secret() [io, net, time, async]
+    let b = double()
+    for how in [oauthmsg.OauthAuthBasic, oauthmsg.OauthAuthPost]
+        let c = confidential(how)
+        match oauthflow.exchange_code("${b}/token", c, pending_for(c), code_cb("good-code"), at())
+            Err(f) => test.fail("refused: ${f.message()}")
+            Ok(t)  =>
+                test.assert_eq_str(t.access_token, "AT1")
+                test.assert_eq_str(t.refresh_token, "RT1")
+                test.assert_eq_str(oauthtoken.extra(t, "tenant") ?? "-", "t-9")
+                test.assert_eq(oauthtoken.seconds_left(t, at()) ?? 0 - 1, 3600)
+
+    test.case("a public client, whose proof is the PKCE verifier alone")
+    let pc = oauthmsg.client("public-cli", "https://client.example.com/cb")
+    match oauthflow.exchange_code("${b}/token", pc, pending_for(pc), code_cb("good-code"), at())
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  => test.assert_eq_str(t.access_token, "AT1")
+
+@test
+fn test_the_code_exchange_refuses_before_and_after_the_network() [io, net, time, async]
+    let b = double()
+    let c = confidential(oauthmsg.OauthAuthBasic)
+    test.case("another flow's callback never reaches the token endpoint")
+    match oauthflow.exchange_code("${b}/token", c, pending_for(c),
+                                  oauthmsg.read_callback("code=good-code&state=other"), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "")
+    test.case("a used code is the server's invalid_grant, with its description and uri")
+    match oauthflow.exchange_code("${b}/token", c, pending_for(c), code_cb("used-code"), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) =>
+            test.assert_eq_str(code_of(f), "invalid_grant")
+            test.assert_eq_str(oautherr.fault_description(f), "code already used")
+            test.assert_eq_str(oautherr.fault_uri(f), "https://id.example/e")
+    test.case("a wrong PKCE verifier is refused by the server's own hash check")
+    let wrong = oauthmsg.pending(c, "xyz", "", "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXX")
+    match oauthflow.exchange_code("${b}/token", c, wrong, code_cb("good-code"), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(oautherr.fault_description(f), "pkce")
+    test.case("a wrong secret is invalid_client")
+    let bad = oauthmsg.with_secret(c, "not-the-secret", oauthmsg.OauthAuthBasic)
+    match oauthflow.exchange_code("${b}/token", bad, pending_for(bad), code_cb("good-code"), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "invalid_client")
+    test.case("the authorization address is the message module's")
+    match oauthflow.authorize_url("${b}/authorize", c, pending_for(c))
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(u)  => test.assert(str.contains(u, "code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"))
+
+// ── Client credentials ───────────────────────────────────────────────
+
+@test
+fn test_client_credentials_need_a_secret() [io, net, time, async]
+    let b = double()
+    match oauthflow.client_credentials("${b}/token", confidential(oauthmsg.OauthAuthBasic), ["api", "read"], at())
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  =>
+            test.assert_eq_str(t.access_token, "CC")
+            test.assert_eq_str(t.scope, "api read")
+            match oauthtoken.authorization_header(t)
+                Ok(h)  => test.assert_eq_str(h, "Bearer CC")
+                Err(_) => test.fail("no header")
+    test.case("a public client is refused before anything is sent")
+    match oauthflow.client_credentials("${b}/token", public_client(), [], at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(oautherr.is_configuration_fault(f))
+    test.case("a wrong secret comes back as the server's 401")
+    let bad = oauthmsg.with_secret(public_client(), "x", oauthmsg.OauthAuthBasic)
+    match oauthflow.client_credentials("${b}/token", bad, [], at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "invalid_client")
+
+// ── Device code ──────────────────────────────────────────────────────
+
+fn a_grant(code: Str, expires_in: Int, interval: Int) -> oauthmsg.OauthDeviceGrant []
+    oauthmsg.OauthDeviceGrant { device_code: code, user_code: "U", verification_uri: "https://x/d",
+                                verification_uri_complete: "", expires_in: expires_in, interval: interval }
+
+@test
+fn test_the_device_flow_begins_and_polls() [io, net, time, async]
+    let b = double()
+    match oauthflow.device_begin("${b}/device", public_client(), [])
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(g)  =>
+            test.assert_eq_str(g.user_code, "WDJB-MJHT")
+            test.assert_eq(g.interval, 1)
+            test.assert(str.contains(oauthmsg.device_prompt(g), "WDJB-MJHT"))
+    test.case("a client the device endpoint does not know")
+    match oauthflow.device_begin("${b}/device", oauthmsg.client("nobody", ""), [])
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "invalid_client")
+    test.case("one poll does not sleep, and pending is an error that is not a failure")
+    match oauthflow.device_poll("${b}/token", public_client(), a_grant("dev-pending", 60, 1), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) =>
+            test.assert(oautherr.is_pending(f))
+            test.assert_eq_str(code_of(f), "authorization_pending")
+
+@test
+fn test_device_wait_sleeps_between_polls_until_the_person_finishes() [io, net, time, async]
+    let b = double()
+    test.case("two pending answers, then the token")
+    match oauthflow.device_wait("${b}/token", public_client(), a_grant("dev-ok-after-2", 60, 1), at())
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  => test.assert_eq_str(t.access_token, "DT")
+    test.case("a final answer ends the wait")
+    match oauthflow.device_wait("${b}/token", public_client(), a_grant("dev-denied", 60, 1), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "access_denied")
+    match oauthflow.device_wait("${b}/token", public_client(), a_grant("dev-expired", 60, 1), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "expired_token")
+    test.case("a grant that runs out while pending is expired locally")
+    match oauthflow.device_wait("${b}/token", public_client(), a_grant("dev-pending", 2, 1), at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "expired_token")
+
+// ── Refresh, revocation, introspection ───────────────────────────────
+
+fn held(refresh: Str, expires_in: Int) -> oauthtoken.OauthToken []
+    match oauthtoken.with_expires_in(oauthtoken.with_refresh(oauthtoken.token("OLD"), refresh), expires_in, at())
+        Ok(t)  => t
+        Err(_) => oauthtoken.token("unreachable")
+
+@test
+fn test_a_refresh_keeps_the_old_refresh_token_unless_the_server_rotates() [io, net, time, async]
+    let b = double()
+    let c = confidential(oauthmsg.OauthAuthBasic)
+    test.case("a server that issues no replacement")
+    match oauthflow.refresh("${b}/token", c, held("RT1", 10), [], at())
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  =>
+            test.assert_eq_str(t.access_token, "AT2")
+            test.assert_eq_str(t.refresh_token, "RT1")
+    test.case("a server that rotates")
+    match oauthflow.refresh("${b}/token", c, held("RT-rotating", 10), ["openid"], at())
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  => test.assert_eq_str(t.refresh_token, "RT-next")
+    test.case("a 200 that is not a token document")
+    match oauthflow.refresh("${b}/token", c, held("RT-garbage", 10), [], at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "access_token"))
+    test.case("a revoked refresh token")
+    match oauthflow.refresh("${b}/token", c, held("RT-dead", 10), [], at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "invalid_grant")
+    test.case("a token with nothing to refresh with")
+    match oauthflow.refresh("${b}/token", c, oauthtoken.token("A"), [], at())
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "invalid_grant")
+
+@test
+fn test_ensure_fresh_refreshes_only_a_token_that_needs_it() [io, net, time, async]
+    let b = double()
+    let c = confidential(oauthmsg.OauthAuthBasic)
+    test.case("plenty of time left: the same token")
+    match oauthflow.ensure_fresh("${b}/token", c, held("RT1", 3600), at(), 30)
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  => test.assert_eq_str(t.access_token, "OLD")
+    test.case("inside the leeway: refreshed")
+    match oauthflow.ensure_fresh("${b}/token", c, held("RT1", 10), at(), 30)
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  => test.assert_eq_str(t.access_token, "AT2")
+    test.case("no expiry: left alone, never refreshed on every call")
+    match oauthflow.ensure_fresh("${b}/token", c, oauthtoken.with_refresh(oauthtoken.token("X"), "RT1"), at(), 30)
+        Err(f) => test.fail("refused: ${f.message()}")
+        Ok(t)  => test.assert_eq_str(t.access_token, "X")
+
+@test
+fn test_revocation_and_introspection() [io, net, time, async]
+    let b = double()
+    let c = confidential(oauthmsg.OauthAuthBasic)
+    test.assert_none(oauthflow.revoke("${b}/revoke", c, "anything", "refresh_token"))
+    match oauthflow.revoke("${b}/revoke", c, "bad", "")
+        None    => test.fail("a 503 was swallowed")
+        Some(f) => test.assert(oautherr.is_retryable(f))
+    match oauthflow.introspect("${b}/introspect", c, "live", "access_token")
+        Err(f)   => test.fail("refused: ${f.message()}")
+        Ok(body) => test.assert(oauthflow.is_active(body))
+    match oauthflow.introspect("${b}/introspect", c, "dead", "")
+        Err(f)   => test.fail("refused: ${f.message()}")
+        Ok(body) => test.assert(not oauthflow.is_active(body))
+    match oauthflow.introspect("${b}/introspect", oauthmsg.client("x", ""), "live", "")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert_eq_str(code_of(f), "invalid_client")
+
+// ── The unpredictable values ─────────────────────────────────────────
+
+@test
+fn test_minted_values_come_from_the_system_generator() [io, fs, rand]
+    match (oauthflow.new_state(), oauthflow.new_state(), oauthflow.new_nonce(), oauthflow.new_verifier())
+        (Ok(a), Ok(b), Ok(n), Ok(v)) =>
+            test.assert_eq(str.len(a), 43)
+            test.assert_eq(str.len(n), 43)
+            test.assert(a != b)
+            test.assert(oauthmsg.verifier_ok(v))
+        _                            => test.fail("no entropy")
+    test.case("begin mints all three, with or without a nonce")
+    let c = public_client()
+    match (oauthflow.begin(c, true), oauthflow.begin(c, false))
+        (Ok(p), Ok(q)) =>
+            test.assert_eq(str.len(p.nonce), 43)
+            test.assert_eq_str(q.nonce, "")
+            test.assert(p.state != q.state)
+            test.assert(p.verifier != q.verifier)
+        _              => test.fail("no entropy")

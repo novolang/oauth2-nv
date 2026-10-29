@@ -1,15 +1,10 @@
 [package]
 name        = "oauth2-nv"
-version     = "0.0.3"
-description = "OAuth 2 and OpenID Connect for a CLIENT: the authorization code flow with PKCE, client credentials, the device code flow and refresh, with the message arithmetic in an effect-free module and one function in the whole package that touches the network.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "OAuth 2 and OpenID Connect for a CLIENT: the authorization code flow with PKCE, client credentials, the device code flow and refresh, with the message arithmetic in effect-free modules and the requests in two others."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `host`, and the split inside it is the design.
 #
@@ -22,22 +17,25 @@ stability   = "draft"
 # running, and it is what makes "did this client check `state`?" a
 # question a reader can answer by reading one function.
 #
-# `oauthflow` and `oauthdisc` are the half that performs.  Their rows
-# are measured rather than asserted:
+# `oauthflow`, `oauthdisc` and `oauthoidc.fetch_userinfo` are the half
+# that performs.  Their rows are measured rather than asserted:
 #
-#   [net, async]       — every token, device, revocation, introspection
-#                        and discovery request, because `http.client.post`
-#                        and `http.client.get_with_headers` cost exactly
-#                        that on this toolchain
-#   [fs, rand]         — minting `state`, `nonce` and the PKCE verifier,
-#                        because the operating system's generator is
-#                        `/dev/urandom` and reading a device is `[fs]`
-#   [net, time, async] — `oauthflow.device_wait` ALONE, which is the one
-#                        function in the package that sleeps
+#   [io, net, time, async] — every token, device, revocation and
+#                            introspection request, because the
+#                            standard library's `HttpClient` is the one
+#                            client that answers the status and body of
+#                            an error reply, and it costs all four;
+#                            `oauthflow.device_wait` has the same row
+#                            and is the one function that sleeps
+#   [net, async]           — discovery, the key set and userinfo, each
+#                            one `http.client.get`
+#   [fs, rand]             — minting `state`, `nonce` and the PKCE
+#                            verifier, because the operating system's
+#                            generator is `/dev/urandom` and reading a
+#                            device is `[fs]`
 #
 # The `[fs]` on the minting functions surprises every reader and it is
-# the honest row: see the README's "Two rows that are wider than they
-# look".
+# the honest row: see the README's "The effect rows worth knowing".
 layer       = "host"
 
 category    = "web"
@@ -45,7 +43,7 @@ category    = "web"
 tags        = ["oauth", "oauth2", "openid-connect", "oidc", "pkce", "authorization-code", "device-code", "client-credentials", "authlib", "native-port"]
 repository  = "https://github.com/novolang/oauth2-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.22.0"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

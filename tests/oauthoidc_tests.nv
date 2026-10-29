@@ -1,9 +1,6 @@
 // oauthoidc_tests.nv — the three checks OpenID Connect adds on top of
 // a JWT, and the one configuration rule.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: oauth2-nv.oauthoidc.<fn>`.
-//
 // WHAT IS ASSERTED HERE IS NOT A SIGNATURE CHECK.  jwt-nv owns that,
 // and its own suite tests it.  What this file tests is the four things
 // this module adds: the algorithm list comes from the DOCUMENT rather
@@ -14,6 +11,7 @@
 use std.test
 use std.str
 use civil
+use jwtalg
 use jwtpolicy
 use oauthdisc
 use oauthmsg
@@ -59,8 +57,8 @@ fn test_the_algorithm_list_comes_from_the_document_never_from_the_header() [io]
 
 @test
 fn test_the_policy_a_caller_would_have_built_by_hand_is_the_one_they_get() [io]
-    test.case("a hand-built policy has its own algorithms")
-    test.assert(str.len(oauthoidc.policy_algs(jwtpolicy.strict())) > 0)
+    test.case("a hand-built permissive policy lists its algorithms")
+    test.assert_eq_str(oauthoidc.policy_algs(jwtpolicy.permissive()), "HS256 RS256 ES256")
 
 @test
 fn test_validate_refuses_an_id_token_naming_which_step() [io]
@@ -189,7 +187,7 @@ fn test_an_absent_email_verified_is_not_a_verified_email() [io]
             test.assert_none(oauthoidc.claim_bool(cl, "email_verified"))
 
 @test
-fn test_a_userinfo_response_is_checked_against_the_id_tokens_subject() [io, net, async]
+fn test_a_userinfo_response_is_checked_against_the_id_tokens_subject() [io]
     // § 5.3.4.  An unchecked userinfo response is another way to
     // attach one person's profile to another's session.
     match oauthoidc.claims_of_verified(
@@ -205,10 +203,20 @@ fn test_a_userinfo_response_is_checked_against_the_id_tokens_subject() [io, net,
             test.assert_some(oauthoidc.check_userinfo_sub(
                 "{\"sub\":\"999\",\"email\":\"b@example.com\"}", cl))
 
-            test.case("and the fetch itself")
-            match oauthdisc.read(a_provider_saying_rs256())
-                Err(_) => test.assert(false)
-                Ok(p)  =>
-                    match oauthoidc.fetch_userinfo(p, "ya29.example")
-                        Ok(_)  => test.assert(true)
-                        Err(_) => test.assert(true)
+fn hand_claims(raw: Str, aud: [Str], azp: Str, at_hash: Str) -> oauthoidc.OauthIdClaims []
+    OauthIdClaims { iss: "i", sub: "s", aud: aud, exp: 2, iat: 1, nonce: "", auth_time: 0, azp: azp,
+                    acr: "", amr: [], at_hash: at_hash, c_hash: "", raw_json: raw }
+
+@test
+fn test_claims_whose_raw_document_is_not_json_have_no_extras() [io]
+    let cl = hand_claims("not json", ["c"], "", "")
+    test.assert_none(oauthoidc.claim(cl, "email"))
+    test.assert_none(oauthoidc.claim_bool(cl, "email_verified"))
+
+@test
+fn test_several_audiences_with_no_azp_are_refused() [io]
+    test.assert(str.contains(oauthoidc.check_azp(hand_claims("{}", ["c", "d"], "", ""), "c")?.message() ?? "", "no azp"))
+
+@test
+fn test_an_at_hash_of_the_wrong_length_is_a_mismatch() [io]
+    test.assert_some(oauthoidc.check_at_hash(hand_claims("{}", ["c"], "", "short"), "tok", Rs256))

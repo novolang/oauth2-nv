@@ -1203,6 +1203,7 @@ fn with_query(endpoint: Str, query: Str) -> Result<Str, oautherr.OauthFault> []
                     else
                         "${q}&${query}"
                     None    => query
+                // Written without the module prefix: the qualified literal is a compiler defect, a-qualified-struct-literal-inside-ok-after-a-let-match-is-an-ice
                 Ok(href.serialize(UrlParts { scheme: parts.scheme, username: parts.username,
                                              password: parts.password, host: parts.host,
                                              has_authority: parts.has_authority,

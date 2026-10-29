@@ -1,45 +1,45 @@
 // oauthflow.nv — the four client flows, performed.  The only module in
 // this package that opens a socket or reads a generator.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// `post_form` is the one exchange: a form body to an endpoint, the
+// client's `Authorization` header added where the client uses one, the
+// reply read as a string on a 2xx and as a fault on anything else.
+// Every flow below is `oauthmsg` arithmetic, one `post_form`, and more
+// `oauthmsg` arithmetic. A reader asking where this module reaches the
+// network reads one function. Discovery, the key set and userinfo are
+// the other requests in the package, and each is a single GET in
+// `oauthdisc` and `oauthoidc`.
 //
-// ONE FUNCTION TOUCHES THE NETWORK.  `post_form` is the single
-// exchange: a form body to an endpoint, the client's credentials
-// attached the way the client says, the reply read as a string.  Every
-// flow below is `oauthmsg` arithmetic, one `post_form`, and more
-// `oauthmsg` arithmetic — which is what makes the package reviewable.
-// A reader asking "can this library reach the network anywhere I did
-// not expect?" reads one function.
+// A redirect is never followed. A token endpoint that answers 307
+// would otherwise receive the client's secret at the address it names.
 //
-// TWO ROWS THAT ARE WIDER THAN THEY LOOK, and both are measured rather
-// than asserted:
+// Two rows are wider than they look.
 //
-// `[fs, rand]` ON THE MINTING FUNCTIONS.  `state`, `nonce` and the
-// PKCE verifier are the three values whose entire purpose is that an
-// attacker cannot predict them.  The standard library's `rand` module
-// is xoshiro256**, which is not a cryptographic generator, so these go
-// through rand-nv's `rng.os_bytes` — and on this platform the
-// operating system's generator is the device `/dev/urandom`, so
-// reading it is `[fs]`.  A caller who sees `[fs]` on `new_state` and
-// wonders what file it is reading has found the right question: it is
-// the entropy device, and the row is the disclosure.  `begin_from`
-// exists for the caller who brought their own bytes, and it is `[]`.
+// `[fs, rand]` on the minting functions. `state`, `nonce` and the PKCE
+// verifier are the three values whose purpose is that an attacker cannot
+// predict them. The standard library's `rand` module is xoshiro256**,
+// which is not a cryptographic generator, so these go through rand-nv's
+// `rng.os_bytes`. On this platform the operating system's generator is
+// the device `/dev/urandom`, and reading a device is `[fs]`. `begin_from`
+// is for a caller who brought their own values, and it is `[]`.
 //
-// `[net, async]` ON EVERY EXCHANGE.  `http.client.post` costs exactly
-// that on this toolchain: `[net]` for the socket, `[async]` because
-// the client runs its own deadline task.  Neither is optional and
-// neither is this package's doing.
+// `[io, net, time, async]` on every exchange. `HttpClient` is the one
+// HTTP client in the standard library that answers the status and body
+// of an error reply, which OAuth 2 needs: `invalid_grant` and
+// `authorization_pending` both arrive as a 400. The one-shot
+// `http.client.post` returns only the body of a 2xx.
 //
-// `[net, time, async]` ON ONE FUNCTION.  `device_wait` sleeps between
-// polls, and it is the only function here that does.  `device_poll` is
-// one poll and does not sleep, so the loop can be the caller's — which
-// matters for a program that has to draw a spinner, answer a cancel
-// key or serve other requests while it waits.  A library that owned
-// the loop would take the program's main thread for a minute and a
-// half.
+// `device_wait` sleeps between polls, and it is the only function here
+// that does. `device_poll` is one poll and does not sleep, so the loop
+// can be the caller's, which matters for a program that has to draw a
+// spinner, answer a cancel key or serve other requests while it waits.
 
+use std.bytes
+use std.json
+use std.time
 use civil
 use oautherr
+use rng
 use oauthmsg
 use oauthtoken
 
@@ -62,7 +62,7 @@ use oauthtoken
 //         Err(_) => println("no generator on this machine")
 // ```
 pub fn new_state() -> Result<Str, oautherr.OauthFault> [fs, rand]
-    todo("oauth2-nv.oauthflow.new_state")
+    armour(rng.os_bytes(oauthmsg.state_bytes()))
 
 // A fresh `nonce`, from the same generator.
 //
@@ -75,7 +75,7 @@ pub fn new_state() -> Result<Str, oautherr.OauthFault> [fs, rand]
 //         Err(_) => println("no generator on this machine")
 // ```
 pub fn new_nonce() -> Result<Str, oautherr.OauthFault> [fs, rand]
-    todo("oauth2-nv.oauthflow.new_nonce")
+    armour(rng.os_bytes(oauthmsg.state_bytes()))
 
 // A fresh PKCE `code_verifier`: `oauthmsg.verifier_bytes()` random
 // bytes, base64url without padding.
@@ -89,7 +89,7 @@ pub fn new_nonce() -> Result<Str, oautherr.OauthFault> [fs, rand]
 //         Err(_) => println("no generator on this machine")
 // ```
 pub fn new_verifier() -> Result<Str, oautherr.OauthFault> [fs, rand]
-    todo("oauth2-nv.oauthflow.new_verifier")
+    armour(rng.os_bytes(oauthmsg.verifier_bytes()))
 
 // ── Starting a flow ──────────────────────────────────────────────────
 
@@ -117,7 +117,10 @@ pub fn new_verifier() -> Result<Str, oautherr.OauthFault> [fs, rand]
 // ```
 pub fn begin(c: oauthmsg.OauthClient,
              want_nonce: Bool) -> Result<oauthmsg.OauthPending, oautherr.OauthFault> [fs, rand]
-    todo("oauth2-nv.oauthflow.begin")
+    let empty = Some(bytes.zeros(0))
+    begin_from_draws(c, rng.os_bytes(oauthmsg.state_bytes()),
+                     (if want_nonce then rng.os_bytes(oauthmsg.state_bytes()) else empty),
+                     rng.os_bytes(oauthmsg.verifier_bytes()))
 
 // The same, with the randomness supplied.
 //
@@ -141,39 +144,61 @@ pub fn begin(c: oauthmsg.OauthClient,
 // ```
 pub fn begin_from(c: oauthmsg.OauthClient, state: Str, nonce: Str,
                   verifier: Str) -> Result<oauthmsg.OauthPending, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthflow.begin_from")
+    if state == ""
+        Err(oautherr.OauthInvalidRequest("a flow needs a state; an empty one checks nothing", ""))
+    else
+        match oauthmsg.pkce_challenge(verifier, c.pkce)
+            Err(f) => Err(f)
+            Ok(_)  => Ok(oauthmsg.pending(c, state, nonce, verifier))
 
 // ── The one exchange ─────────────────────────────────────────────────
 
 // A form body to a token-shaped endpoint, with this client's
 // credentials attached, and the reply as a string.
 //
-// The whole of this package's network surface.  `[net, async]`,
-// measured: `http.client.post` costs both, the second because the
-// client runs a deadline task around the request.
+// The request every flow below is built on: the parameters as a form
+// body, and the reply as a string.
 //
-// Answers the body on a 2xx and a fault on anything else, with
-// `oauthmsg.fault_of` reading the error document — so a caller that
-// wants the raw body of a non-standard endpoint (an introspection
-// response, a provider's own userinfo) gets a string and parses it
-// itself.
+// The parameters already carry the client's body credentials, which the
+// `oauthmsg.*_params` functions add; this function adds only the
+// `Authorization` header of a `client_secret_basic` client. Answers the
+// body on a 2xx and a fault on anything else, with `oauthmsg.fault_of`
+// reading the error document, so a caller that wants the raw body of a
+// non-standard endpoint gets a string and parses it itself.
 //
-// Refuses a non-`https` endpoint before opening anything, which is the
-// one check that has to happen before the socket rather than after.
+// Refuses an endpoint that is not `https` before opening anything. The
+// one exception is a loopback address, RFC 8252 section 8.3. A redirect
+// is not followed.
 //
 // ```novo
 // use oauthflow
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
 //     match oauthflow.post_form("https://id.example/token", c, [("grant_type", "x")])
 //         Ok(body) => println(body)
 //         Err(_)   => println("the exchange failed")
 // ```
 pub fn post_form(endpoint: Str, c: oauthmsg.OauthClient,
-                 params: [(Str, Str)]) -> Result<Str, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.post_form")
+                 params: [(Str, Str)]) -> Result<Str, oautherr.OauthFault> [io, net, time, async]
+    if not oauthmsg.endpoint_ok(endpoint)
+        Err(oautherr.OauthInsecureEndpoint(endpoint))
+    else
+        var client = HttpClient.new("").with_redirects(0)
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_header("Accept", "application/json")
+        match oauthmsg.auth_header(c)
+            Some(h) =>
+                client = client.with_header("Authorization", h)
+            None    => ()
+        match client.post(endpoint, oauthmsg.encode_body(params))
+            Err(e)    => Err(oautherr.OauthTransport(http.client.error_text(e)))
+            Ok(reply) =>
+                if reply.status >= 200 and reply.status < 300
+                    Ok(http.client.text(reply))
+                else
+                    Err(oauthmsg.fault_of(reply.status, http.client.text(reply)))
 
 // ── Authorization code with PKCE ─────────────────────────────────────
 
@@ -196,7 +221,7 @@ pub fn post_form(endpoint: Str, c: oauthmsg.OauthClient,
 // ```
 pub fn authorize_url(endpoint: Str, c: oauthmsg.OauthClient,
                      p: oauthmsg.OauthPending) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthflow.authorize_url")
+    oauthmsg.authorize_url(endpoint, c, p, [])
 
 // Exchange an authorization code for a token (RFC 6749 § 4.1.3,
 // RFC 7636 § 4.5).
@@ -217,7 +242,7 @@ pub fn authorize_url(endpoint: Str, c: oauthmsg.OauthClient,
 // use oauthflow
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     match civil.date(2026, 9, 11)
 //         Err(_) => println("no")
 //         Ok(d)  =>
@@ -234,8 +259,13 @@ pub fn authorize_url(endpoint: Str, c: oauthmsg.OauthClient,
 // ```
 pub fn exchange_code(endpoint: Str, c: oauthmsg.OauthClient, p: oauthmsg.OauthPending,
                      cb: oauthmsg.OauthCallback,
-                     arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.exchange_code")
+                     arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [io, net, time, async]
+    match oauthmsg.check_state(p, cb)
+        Err(f)   => Err(f)
+        Ok(code) =>
+            match post_form(endpoint, c, oauthmsg.code_params(c, p, code))
+                Err(f)   => Err(f)
+                Ok(body) => oauthmsg.read_token_response(body, arrived_at)
 
 // ── Client credentials ───────────────────────────────────────────────
 
@@ -251,7 +281,7 @@ pub fn exchange_code(endpoint: Str, c: oauthmsg.OauthClient, p: oauthmsg.OauthPe
 // use oauthflow
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     match civil.date(2026, 9, 11)
 //         Err(_) => println("no")
 //         Ok(d)  =>
@@ -263,8 +293,13 @@ pub fn exchange_code(endpoint: Str, c: oauthmsg.OauthClient, p: oauthmsg.OauthPe
 //                 Err(_) => println("the exchange failed")
 // ```
 pub fn client_credentials(endpoint: Str, c: oauthmsg.OauthClient, scopes: [Str],
-                          arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.client_credentials")
+                          arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [io, net, time, async]
+    if not oauthmsg.is_confidential(c)
+        Err(oautherr.OauthInvalidClient("a public client has no credentials for the client credentials grant", ""))
+    else
+        match post_form(endpoint, c, oauthmsg.client_credentials_params(c, scopes))
+            Err(f)   => Err(f)
+            Ok(body) => oauthmsg.read_token_response(body, arrived_at)
 
 // ── Device code ──────────────────────────────────────────────────────
 
@@ -279,15 +314,17 @@ pub fn client_credentials(endpoint: Str, c: oauthmsg.OauthClient, scopes: [Str],
 // use oauthflow
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     let c = oauthmsg.client("tv", "")
 //     match oauthflow.device_begin("https://id.example/device", c, ["openid"])
 //         Ok(g)  => println(oauthmsg.device_prompt(g))
 //         Err(_) => println("the request failed")
 // ```
 pub fn device_begin(endpoint: Str, c: oauthmsg.OauthClient,
-                    scopes: [Str]) -> Result<oauthmsg.OauthDeviceGrant, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.device_begin")
+                    scopes: [Str]) -> Result<oauthmsg.OauthDeviceGrant, oautherr.OauthFault> [io, net, time, async]
+    match post_form(endpoint, c, oauthmsg.device_params(c, scopes))
+        Err(f)   => Err(f)
+        Ok(body) => oauthmsg.read_device_response(body)
 
 // ONE poll of the token endpoint for a device grant (RFC 8628 § 3.4).
 //
@@ -303,7 +340,7 @@ pub fn device_begin(endpoint: Str, c: oauthmsg.OauthClient,
 // use oautherr
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     match civil.date(2026, 9, 11)
 //         Err(_) => println("no")
 //         Ok(d)  =>
@@ -317,8 +354,10 @@ pub fn device_begin(endpoint: Str, c: oauthmsg.OauthClient,
 //                         Err(f) => println("${oautherr.is_pending(f)}")
 // ```
 pub fn device_poll(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDeviceGrant,
-                   arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.device_poll")
+                   arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [io, net, time, async]
+    match post_form(endpoint, c, oauthmsg.device_token_params(c, g.device_code))
+        Err(f)   => Err(f)
+        Ok(body) => oauthmsg.read_token_response(body, arrived_at)
 
 // Poll until the end user finishes, sleeping between attempts.
 //
@@ -351,8 +390,29 @@ pub fn device_poll(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDevi
 //                         Err(_) => println("the end user did not finish")
 // ```
 pub fn device_wait(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDeviceGrant,
-                   started_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, time, async]
-    todo("oauth2-nv.oauthflow.device_wait")
+                   started_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [io, net, time, async]
+    var interval = g.interval
+    var waited = 0
+    var out: Result<oauthtoken.OauthToken, oautherr.OauthFault> = Err(oautherr.OauthExpiredToken)
+    var going = true
+    while going
+        if waited + interval > g.expires_in
+            out = Err(oautherr.OauthExpiredToken)
+            going = false
+        else
+            time.sleep(int.to_float(interval))
+            waited = waited + interval
+            match device_poll(endpoint, c, g, started_at)
+                Ok(t)  =>
+                    out = Ok(t)
+                    going = false
+                Err(f) =>
+                    if oautherr.is_pending(f)
+                        interval = oautherr.poll_delay(f, interval)
+                    else
+                        out = Err(f)
+                        going = false
+    out
 
 // ── Refresh ──────────────────────────────────────────────────────────
 
@@ -374,7 +434,7 @@ pub fn device_wait(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDevi
 // use oauthmsg
 // use oauthtoken
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     match civil.date(2026, 9, 11)
 //         Err(_) => println("no")
 //         Ok(d)  =>
@@ -386,8 +446,20 @@ pub fn device_wait(endpoint: Str, c: oauthmsg.OauthClient, g: oauthmsg.OauthDevi
 //                 Err(_) => println("the refresh failed")
 // ```
 pub fn refresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthToken, scopes: [Str],
-               arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.refresh")
+               arrived_at: civil.CivilDateTime) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [io, net, time, async]
+    if t.refresh_token == ""
+        Err(oautherr.OauthInvalidGrant("the token has no refresh token", ""))
+    else
+        match post_form(endpoint, c, oauthmsg.refresh_params(c, t.refresh_token, scopes))
+            Err(f)   => Err(f)
+            Ok(body) =>
+                match oauthmsg.read_token_response(body, arrived_at)
+                    Err(f)  => Err(f)
+                    Ok(new) =>
+                        if new.refresh_token == ""
+                            Ok(oauthtoken.with_refresh(new, t.refresh_token))
+                        else
+                            Ok(new)
 
 // The token, refreshed only if it needs it.
 //
@@ -405,7 +477,7 @@ pub fn refresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthToken,
 // use oauthmsg
 // use oauthtoken
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     match civil.date(2026, 9, 11)
 //         Err(_) => println("no")
 //         Ok(d)  =>
@@ -418,8 +490,11 @@ pub fn refresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthToken,
 // ```
 pub fn ensure_fresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthToken,
                     now: civil.CivilDateTime,
-                    leeway_secs: Int) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.ensure_fresh")
+                    leeway_secs: Int) -> Result<oauthtoken.OauthToken, oautherr.OauthFault> [io, net, time, async]
+    if oauthtoken.needs_refresh(t, now, leeway_secs)
+        refresh(endpoint, c, t, [], now)
+    else
+        Ok(t)
 
 // ── Revocation and introspection ─────────────────────────────────────
 
@@ -437,15 +512,17 @@ pub fn ensure_fresh(endpoint: Str, c: oauthmsg.OauthClient, t: oauthtoken.OauthT
 // use oauthflow
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
 //     match oauthflow.revoke("https://id.example/revoke", c, "tok", "refresh_token")
 //         Some(_) => println("the revocation failed")
 //         None    => println("revoked")
 // ```
 pub fn revoke(endpoint: Str, c: oauthmsg.OauthClient, token: Str,
-              type_hint: Str) -> ?oautherr.OauthFault [net, async]
-    todo("oauth2-nv.oauthflow.revoke")
+              type_hint: Str) -> ?oautherr.OauthFault [io, net, time, async]
+    match post_form(endpoint, c, oauthmsg.revoke_params(c, token, type_hint))
+        Err(f) => Some(f)
+        Ok(_)  => None
 
 // Introspect a token (RFC 7662 § 2), as the raw JSON document.
 //
@@ -462,15 +539,15 @@ pub fn revoke(endpoint: Str, c: oauthmsg.OauthClient, token: Str,
 // use oauthflow
 // use oauthmsg
 //
-// fn main() [io, net, async]
+// fn main() [io, net, time, async]
 //     let c = oauthmsg.with_secret(oauthmsg.client("rs", ""), "s", oauthmsg.OauthAuthBasic)
 //     match oauthflow.introspect("https://id.example/introspect", c, "tok", "")
 //         Ok(doc) => println("${oauthflow.is_active(doc)}")
 //         Err(_)  => println("the introspection failed")
 // ```
 pub fn introspect(endpoint: Str, c: oauthmsg.OauthClient, token: Str,
-                  type_hint: Str) -> Result<Str, oautherr.OauthFault> [net, async]
-    todo("oauth2-nv.oauthflow.introspect")
+                  type_hint: Str) -> Result<Str, oautherr.OauthFault> [io, net, time, async]
+    post_form(endpoint, c, oauthmsg.introspect_params(c, token, type_hint))
 
 // The `active` member of an introspection response.
 //
@@ -485,4 +562,46 @@ pub fn introspect(endpoint: Str, c: oauthmsg.OauthClient, token: Str,
 //     println("${oauthflow.is_active("{}")}")
 // ```
 pub fn is_active(introspection_json: Str) -> Bool []
-    todo("oauth2-nv.oauthflow.is_active")
+    match json.parse(introspection_json)
+        None    => false
+        Some(v) => json.get_bool(v, "active") ?? false
+
+// Raw bytes from the operating system as an unpadded base64url token, or
+// the refusal when the system gave none.  Split from the draw so the
+// refusal is a branch a test reaches by passing `None`.
+fn armour(raw: ?Bytes) -> Result<Str, oautherr.OauthFault> []
+    match raw
+        None    => Err(oautherr.OauthNoEntropy)
+        Some(b) => Ok(oauthmsg.verifier_of(b))
+
+// `begin` over three draws the caller already made.
+//
+// Each draw is what `rng.os_bytes` answers: `None` where the system
+// gave nothing, which is `OauthNoEntropy`, because a flow refuses
+// rather than starting with a value it did not get.  The nonce draw is
+// an empty `Some` where no nonce was wanted.  The twin of `begin` for a
+// test that must reach the refusal, and for a caller that draws its
+// bytes some other way.
+//
+// ```novo
+// use std.bytes
+// use oauthflow
+// use oauthmsg
+//
+// fn main() [io]
+//     let c = oauthmsg.client("cli", "http://127.0.0.1:8765/cb")
+//     match oauthflow.begin_from_draws(c, None, Some(bytes.zeros(0)), None)
+//         Ok(_)  => println("started")
+//         Err(f) => println(f.message())   // the operating system's generator answered nothing
+// ```
+pub fn begin_from_draws(c: oauthmsg.OauthClient, state: ?Bytes, nonce: ?Bytes,
+                        verifier: ?Bytes) -> Result<oauthmsg.OauthPending, oautherr.OauthFault> []
+    match armour(state)
+        Err(f) => Err(f)
+        Ok(s)  =>
+            match armour(nonce)
+                Err(f) => Err(f)
+                Ok(n)  =>
+                    match armour(verifier)
+                        Err(f) => Err(f)
+                        Ok(v)  => begin_from(c, s, n, v)

@@ -1,9 +1,6 @@
 // oauthdisc_tests.nv — the two `.well-known` paths that are not the
 // same URL, and the issuer check that is not optional.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: oauth2-nv.oauthdisc.<fn>`.
-//
 // THE URL ASSERTIONS ARE THE POINT OF THIS FILE.  OpenID Connect
 // Discovery 1.0 § 4 APPENDS `/.well-known/openid-configuration` to the
 // issuer; RFC 8414 § 3.1 INSERTS
@@ -15,6 +12,8 @@
 
 use std.test
 use std.list
+use std.str
+use oautherr
 use oauthdisc
 
 // A discovery document with the four members every flow needs.
@@ -187,25 +186,69 @@ fn test_a_key_is_selected_by_kid_and_nothing_else() [io]
         Err(_) => test.assert(false)
         Ok(ks) => test.assert_none(oauthdisc.key_for(ks, "2026-09"))
 
+fn bare_provider(raw: Str) -> oauthdisc.OauthProvider []
+    OauthProvider { issuer: "i", authorization_endpoint: "", token_endpoint: "", device_authorization_endpoint: "",
+                    userinfo_endpoint: "", jwks_uri: "", revocation_endpoint: "", introspection_endpoint: "",
+                    end_session_endpoint: "", registration_endpoint: "", scopes_supported: [],
+                    response_types_supported: [], response_modes_supported: [], grant_types_supported: [],
+                    code_challenge_methods_supported: [], token_endpoint_auth_methods_supported: [],
+                    id_token_signing_alg_values_supported: [], subject_types_supported: [], raw_json: raw }
+
 @test
-fn test_the_three_calls_that_reach_the_network() [io, net, async]
-    // Nothing resolves `id.example`, so these assert only that they
-    // answer rather than what they answer.  The day a body lands this
-    // file is where a test double is pointed.
-    test.case("discovery for an issuer")
-    match oauthdisc.fetch("https://id.example")
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)
-
-    test.case("discovery at an exact address, with the issuer check kept")
-    match oauthdisc.fetch_at("https://mirror.example/oidc.json", "https://id.example")
-        Ok(_)  => test.assert(true)
-        Err(_) => test.assert(true)
-
-    test.case("and the key set")
-    match oauthdisc.read(a_document())
-        Err(_) => test.assert(false)
+fn test_every_member_a_flow_needs_is_read_and_a_listed_grant_is_looked_up() [io]
+    match oauthdisc.read("{\"issuer\":\"i\",\"grant_types_supported\":[\"refresh_token\",5],\"token_endpoint_auth_methods_supported\":[\"client_secret_post\"],\"scopes_supported\":[\"openid\"],\"service_documentation\":\"https://d\"}")
+        Err(_) => test.fail("refused")
         Ok(p)  =>
-            match oauthdisc.fetch_jwks(p)
-                Ok(_)  => test.assert(true)
-                Err(_) => test.assert(true)
+            test.case("a listed grant is true and an unlisted one false, the default no longer applies")
+            test.assert(oauthdisc.supports_grant(p, "refresh_token"))
+            test.assert(not oauthdisc.supports_grant(p, "authorization_code"))
+            test.case("the same for authentication methods")
+            test.assert(oauthdisc.supports_auth_method(p, "client_secret_post"))
+            test.assert(not oauthdisc.supports_auth_method(p, "client_secret_basic"))
+            test.case("a non-string array element is dropped")
+            test.assert_eq(list.len(p.grant_types_supported), 1)
+            test.assert_eq_str(oauthdisc.extra(p, "service_documentation") ?? "-", "https://d")
+
+@test
+fn test_missing_for_knows_the_four_flows_and_says_so_about_others() [io]
+    let p = bare_provider("{}")
+    test.assert_eq(list.len(oauthdisc.missing_for(p, "authorization_code")), 2)
+    test.assert_eq(list.len(oauthdisc.missing_for(p, "device_code")), 2)
+    test.assert_eq(list.len(oauthdisc.missing_for(p, "client_credentials")), 1)
+    test.assert_eq(list.len(oauthdisc.missing_for(p, "refresh_token")), 1)
+    let other = oauthdisc.missing_for(p, "implicit")
+    test.assert_eq(list.len(other), 1)
+    test.assert(str.contains(other[0], "implicit"))
+
+@test
+fn test_discovery_addresses_for_the_issuers_that_are_not_plain() [io]
+    test.case("a trailing slash is dropped before the suffix is appended")
+    test.assert_eq_str(shown(oauthdisc.openid_url("https://id.example/")),
+        "https://id.example/.well-known/openid-configuration")
+    test.assert_eq_str(shown(oauthdisc.openid_url("https://id.example/t/")),
+        "https://id.example/t/.well-known/openid-configuration")
+    test.assert_eq_str(shown(oauthdisc.oauth_url("https://id.example/t/")),
+        "https://id.example/.well-known/oauth-authorization-server/t")
+    test.case("a port and a deeper path")
+    test.assert_eq_str(shown(oauthdisc.oauth_url("https://id.example:8443/a/b")),
+        "https://id.example:8443/.well-known/oauth-authorization-server/a/b")
+    test.case("something that is not a URL at all")
+    test.assert_eq(list.len(oauthdisc.discovery_urls("not a url")), 0)
+    test.assert_eq(list.len(oauthdisc.discovery_urls("http://id.example")), 0)
+    test.assert_eq(list.len(oauthdisc.discovery_urls("https://id.example")), 2)
+    match oauthdisc.openid_url("not a url")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "not a url"))
+
+@test
+fn test_a_document_that_is_json_but_not_an_object_is_refused() [io]
+    match oauthdisc.read("[1]")
+        Ok(_)  => test.fail("accepted")
+        Err(f) => test.assert(str.contains(f.message(), "object"))
+    test.case("a hand-built provider whose raw document is not JSON has no extras")
+    test.assert_none(oauthdisc.extra(bare_provider("not json"), "x"))
+
+fn shown(r: Result<Str, oautherr.OauthFault>) -> Str []
+    match r
+        Ok(u)  => u
+        Err(f) => f.message()
