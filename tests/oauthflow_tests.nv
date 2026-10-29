@@ -7,7 +7,7 @@
 // grammar, and read an introspection document.  Those refusals are the
 // ones a deployment meets on its first run.  Everything that does reach
 // a server is in oauthnet_tests.nv, against a local authorization
-// server (tests/network.sh).
+// server that the suite starts itself.
 
 use std.test
 use std.bytes
