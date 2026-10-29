@@ -59,20 +59,20 @@ novo        = ">= 0.8.9"
 # and the two padding rules — the standard library's `bytes.to_base64`
 # is the padded standard alphabet only, so a PKCE challenge built with
 # it is rejected by every authorization server.
-base64-nv   = "^0.0.1"
+base64-nv   = "^0.1.1"
 
 # calendar-nv is what an expiry IS.  A token response carries
 # `expires_in` as a count of seconds, which is a duration and not an
 # instant; turning it into one needs a civil date-time to add it to,
 # and comparing it later needs another.  Both arrive as arguments,
 # which is why `oauthtoken` has no clock.
-calendar-nv = "^0.0.2"
+calendar-nv = "^0.2.1"
 
 # crypto-nv is SHA-256, twice: the PKCE challenge (RFC 7636 § 4.2) and
 # OpenID Connect Core § 3.1.3.6's `at_hash`, which is the left half of
 # the hash of the access token and the only thing that ties an
 # id_token to the token that arrived beside it.
-crypto-nv   = "^0.1.1"
+crypto-nv   = "^0.1.7"
 
 # form-nv is both directions of `application/x-www-form-urlencoded`.
 # `formurl.serialise` writes every token-endpoint body RFC 6749 § 4
@@ -82,7 +82,7 @@ crypto-nv   = "^0.1.1"
 # standard library's `http.server.query_get` cannot: it answers the
 # first and drops the rest, and "the first `state`" is exactly the
 # value an attacker would like the client to check.
-form-nv     = "^0.0.1"
+form-nv     = "^0.1.1"
 
 # jwt-nv is the id_token.  `oauthoidc` is a policy over it and not a
 # second verifier: `jwtpolicy` already carries the algorithm allow-list,
@@ -90,7 +90,14 @@ form-nv     = "^0.0.1"
 # lifetime, and OpenID Connect adds exactly three checks on top —
 # `nonce`, `azp` and `at_hash`.  Writing a fourth JWT verifier here is
 # how a client ends up accepting `alg: none`.
-jwt-nv      = "^0.0.3"
+# A path while jwt-nv 0.1.0 is not on the registry; it becomes `^0.1.0` at publish.
+jwt-nv      = { path = "../jwt-nv" }
+
+# p256-nv builds the ES256 verifying keys that `oauthdisc.read_jwks`
+# reads out of a JWKS (RFC 7518 § 6.2.1: `x` and `y` are the point's
+# coordinates).  A path while p256-nv 0.1.0 is not on the registry; it
+# becomes `^0.1.0` at publish.
+p256-nv     = { path = "../p256-nv" }
 
 # rand-nv is the operating system's generator.  `state`, `nonce` and
 # the PKCE verifier are the three values in this package whose whole
@@ -100,11 +107,11 @@ jwt-nv      = "^0.0.3"
 # answers `None` where there is none, which is why every minting
 # function answers a `Result` and `OauthNoEntropy` is a named fault
 # rather than a silently weaker token.
-rand-nv     = "^0.1.4"
+rand-nv     = "^0.1.9"
 
 # url-nv is the authorization URL and the discovery URL.  RFC 3986
 # § 5.3 join is what turns an issuer into a `.well-known` address, and
 # `uri.parse` is what `oauthmsg.authorize_url` checks the scheme with —
 # an authorization request over `http` puts the authorization code in a
 # proxy's log, so it is refused by name rather than warned about.
-url-nv      = "^0.1.1"
+url-nv      = "^0.1.4"

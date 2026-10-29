@@ -1,7 +1,5 @@
 // oautherr.nv — every way a client flow ends badly, as one enum.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THREE POPULATIONS IN ONE TYPE, and the reason they are one type is
 // that a caller cannot tell them apart at the call site.  A token
 // request comes back with `invalid_grant` (the wire, RFC 6749 § 5.2),
@@ -72,9 +70,11 @@ pub enum OauthFault
     // and poll again.  It is in this enum because it arrives through
     // the same `Result`, and `is_pending` is what a caller branches on.
     OauthAuthorizationPending
-    // Poll less often.  The interval carried here is the new one: the
-    // specification says add five seconds to the current interval, and
-    // a client that ignores this is rate-limited off the endpoint.
+    // Poll less often.  The interval carried is a floor on the new
+    // wait, in seconds, and zero where the answer did not name one
+    // (the wire never does).  The specification says add five seconds
+    // to the current interval, and a client that ignores this is
+    // rate-limited off the endpoint; `poll_delay` does the sum.
     OauthSlowDown(interval_secs: Int)
     // The end user refused, at the verification page or at the
     // consent screen.  A final answer: do not poll again.
@@ -134,7 +134,39 @@ impl Error for OauthFault
     // than the server.  A reader who cannot tell those apart cannot
     // tell a misconfiguration from an attack.
     fn message(self) -> Str
-        todo("oauth2-nv.oautherr.OauthFault.message")
+        match self
+            OauthInvalidRequest(d, _)          => wire_line("invalid_request", d)
+            OauthInvalidClient(d, _)           => wire_line("invalid_client", d)
+            OauthInvalidGrant(d, _)            => wire_line("invalid_grant", d)
+            OauthUnauthorizedClient(d, _)      => wire_line("unauthorized_client", d)
+            OauthUnsupportedGrantType(d, _)    => wire_line("unsupported_grant_type", d)
+            OauthInvalidScope(d, _)            => wire_line("invalid_scope", d)
+            OauthUnsupportedResponseType(d, _) => wire_line("unsupported_response_type", d)
+            OauthServerError(d, _)             => wire_line("server_error", d)
+            OauthTemporarilyUnavailable(d, _)  => wire_line("temporarily_unavailable", d)
+            OauthAuthorizationPending          => "the server answered authorization_pending: the end user has not finished yet"
+            OauthSlowDown(_)                   => "the server answered slow_down: poll less often"
+            OauthAccessDenied(d)               => wire_line("access_denied", d)
+            OauthExpiredToken                  => "the server answered expired_token: the device code has expired"
+            OauthStateMismatch(want, got)      => "this client refused the callback: it carried the state '${got}' and the flow sent '${want}'"
+            OauthNonceMismatch(want, got)      => "this client refused the id_token: its nonce is '${got}' and the flow sent '${want}'"
+            OauthIssuerMismatch(want, got)     => "this client refused the issuer '${got}': the flow was configured with '${want}'"
+            OauthNoEntropy                     => "this client refused to start: the operating system's generator answered nothing"
+            OauthTransport(detail)             => "the exchange did not complete: ${detail}"
+            OauthMalformedResponse(detail)     => "the reply was not an OAuth 2 document: ${detail}"
+            OauthMissingField(field)           => "the reply has no '${field}' member"
+            OauthUnknownErrorCode(code, d)     => wire_line(code, d)
+            OauthIdTokenRejected(reason)       => "this client refused the id_token: ${reason}"
+            OauthDiscoveryIncomplete(field)    => "the discovery document has no '${field}' member"
+            OauthInsecureEndpoint(url)         => "this client refused the endpoint '${url}': it is not https"
+
+// One report line for a fault the server named: the code, then the
+// description where there is one.
+fn wire_line(code: Str, description: Str) -> Str []
+    if description == ""
+        "the server answered ${code}"
+    else
+        "the server answered ${code}: ${description}"
 
 // The wire spelling of a fault that has one: `invalid_grant`,
 // `slow_down`, `authorization_pending`.
@@ -149,7 +181,22 @@ impl Error for OauthFault
 //     println(oautherr.fault_code(oautherr.OauthExpiredToken))
 // ```
 pub fn fault_code(f: OauthFault) -> Str []
-    todo("oauth2-nv.oautherr.fault_code")
+    match f
+        OauthInvalidRequest(_, _)          => "invalid_request"
+        OauthInvalidClient(_, _)           => "invalid_client"
+        OauthInvalidGrant(_, _)            => "invalid_grant"
+        OauthUnauthorizedClient(_, _)      => "unauthorized_client"
+        OauthUnsupportedGrantType(_, _)    => "unsupported_grant_type"
+        OauthInvalidScope(_, _)            => "invalid_scope"
+        OauthUnsupportedResponseType(_, _) => "unsupported_response_type"
+        OauthServerError(_, _)             => "server_error"
+        OauthTemporarilyUnavailable(_, _)  => "temporarily_unavailable"
+        OauthAuthorizationPending          => "authorization_pending"
+        OauthSlowDown(_)                   => "slow_down"
+        OauthAccessDenied(_)               => "access_denied"
+        OauthExpiredToken                  => "expired_token"
+        OauthUnknownErrorCode(code, _)     => code
+        _                                  => ""
 
 // A wire code and its optional description and URI, as a fault.
 //
@@ -165,7 +212,34 @@ pub fn fault_code(f: OauthFault) -> Str []
 //     println(oautherr.fault_code(oautherr.fault_named("invalid_grant", "", "")))
 // ```
 pub fn fault_named(code: Str, description: Str, uri: Str) -> OauthFault []
-    todo("oauth2-nv.oautherr.fault_named")
+    if code == "invalid_request"
+        OauthInvalidRequest(description, uri)
+    else if code == "invalid_client"
+        OauthInvalidClient(description, uri)
+    else if code == "invalid_grant"
+        OauthInvalidGrant(description, uri)
+    else if code == "unauthorized_client"
+        OauthUnauthorizedClient(description, uri)
+    else if code == "unsupported_grant_type"
+        OauthUnsupportedGrantType(description, uri)
+    else if code == "invalid_scope"
+        OauthInvalidScope(description, uri)
+    else if code == "unsupported_response_type"
+        OauthUnsupportedResponseType(description, uri)
+    else if code == "server_error"
+        OauthServerError(description, uri)
+    else if code == "temporarily_unavailable"
+        OauthTemporarilyUnavailable(description, uri)
+    else if code == "authorization_pending"
+        OauthAuthorizationPending
+    else if code == "slow_down"
+        OauthSlowDown(0)
+    else if code == "access_denied"
+        OauthAccessDenied(description)
+    else if code == "expired_token"
+        OauthExpiredToken
+    else
+        OauthUnknownErrorCode(code, description)
 
 // The server's `error_description`, or empty where there was none.
 //
@@ -176,7 +250,19 @@ pub fn fault_named(code: Str, description: Str, uri: Str) -> OauthFault []
 //     println(oautherr.fault_description(oautherr.OauthNoEntropy))
 // ```
 pub fn fault_description(f: OauthFault) -> Str []
-    todo("oauth2-nv.oautherr.fault_description")
+    match f
+        OauthInvalidRequest(d, _)          => d
+        OauthInvalidClient(d, _)           => d
+        OauthInvalidGrant(d, _)            => d
+        OauthUnauthorizedClient(d, _)      => d
+        OauthUnsupportedGrantType(d, _)    => d
+        OauthInvalidScope(d, _)            => d
+        OauthUnsupportedResponseType(d, _) => d
+        OauthServerError(d, _)             => d
+        OauthTemporarilyUnavailable(d, _)  => d
+        OauthAccessDenied(d)               => d
+        OauthUnknownErrorCode(_, d)        => d
+        _                                  => ""
 
 // The server's `error_uri`, or empty where there was none.
 //
@@ -187,7 +273,17 @@ pub fn fault_description(f: OauthFault) -> Str []
 //     println(oautherr.fault_uri(oautherr.OauthNoEntropy))
 // ```
 pub fn fault_uri(f: OauthFault) -> Str []
-    todo("oauth2-nv.oautherr.fault_uri")
+    match f
+        OauthInvalidRequest(_, u)          => u
+        OauthInvalidClient(_, u)           => u
+        OauthInvalidGrant(_, u)            => u
+        OauthUnauthorizedClient(_, u)      => u
+        OauthUnsupportedGrantType(_, u)    => u
+        OauthInvalidScope(_, u)            => u
+        OauthUnsupportedResponseType(_, u) => u
+        OauthServerError(_, u)             => u
+        OauthTemporarilyUnavailable(_, u)  => u
+        _                                  => ""
 
 // Whether sending the same request again could succeed.
 //
@@ -203,7 +299,11 @@ pub fn fault_uri(f: OauthFault) -> Str []
 //     println("${oautherr.is_retryable(oautherr.OauthExpiredToken)}")
 // ```
 pub fn is_retryable(f: OauthFault) -> Bool []
-    todo("oauth2-nv.oautherr.is_retryable")
+    match f
+        OauthServerError(_, _)            => true
+        OauthTemporarilyUnavailable(_, _) => true
+        OauthTransport(_)                 => true
+        _                                 => false
 
 // Whether the device flow should keep polling.
 //
@@ -218,7 +318,10 @@ pub fn is_retryable(f: OauthFault) -> Bool []
 //     println("${oautherr.is_pending(oautherr.OauthAuthorizationPending)}")
 // ```
 pub fn is_pending(f: OauthFault) -> Bool []
-    todo("oauth2-nv.oautherr.is_pending")
+    match f
+        OauthAuthorizationPending => true
+        OauthSlowDown(_)          => true
+        _                         => false
 
 // The number of seconds to wait before polling again, given the
 // interval the device grant asked for.
@@ -235,7 +338,15 @@ pub fn is_pending(f: OauthFault) -> Bool []
 //     println("${oautherr.poll_delay(oautherr.OauthAuthorizationPending, 5)}")
 // ```
 pub fn poll_delay(f: OauthFault, grant_interval_secs: Int) -> Int []
-    todo("oauth2-nv.oautherr.poll_delay")
+    match f
+        OauthAuthorizationPending => grant_interval_secs
+        OauthSlowDown(carried)    =>
+            let spec = grant_interval_secs + 5
+            if carried > spec
+                carried
+            else
+                spec
+        _                         => 0
 
 // Whether the end user has to do something before this can succeed:
 // go to the verification page, consent, or pick another account.
@@ -247,7 +358,12 @@ pub fn poll_delay(f: OauthFault, grant_interval_secs: Int) -> Int []
 //     println("${oautherr.needs_user_action(oautherr.OauthAccessDenied(""))}")
 // ```
 pub fn needs_user_action(f: OauthFault) -> Bool []
-    todo("oauth2-nv.oautherr.needs_user_action")
+    match f
+        OauthAuthorizationPending => true
+        OauthAccessDenied(_)      => true
+        OauthExpiredToken         => true
+        OauthInvalidGrant(_, _)   => true
+        _                         => false
 
 // Whether this is a deployment that is wrong rather than a request
 // that failed: an unregistered redirect URI, an unsupported grant
@@ -265,7 +381,17 @@ pub fn needs_user_action(f: OauthFault) -> Bool []
 //     println("${oautherr.is_configuration_fault(f)}")
 // ```
 pub fn is_configuration_fault(f: OauthFault) -> Bool []
-    todo("oauth2-nv.oautherr.is_configuration_fault")
+    match f
+        OauthInvalidRequest(_, _)          => true
+        OauthInvalidClient(_, _)           => true
+        OauthUnauthorizedClient(_, _)      => true
+        OauthUnsupportedGrantType(_, _)    => true
+        OauthInvalidScope(_, _)            => true
+        OauthUnsupportedResponseType(_, _) => true
+        OauthIssuerMismatch(_, _)          => true
+        OauthDiscoveryIncomplete(_)        => true
+        OauthInsecureEndpoint(_)           => true
+        _                                  => false
 
 // Whether the fault's text may be shown to an end user.
 //
@@ -282,7 +408,14 @@ pub fn is_configuration_fault(f: OauthFault) -> Bool []
 //     println("${oautherr.is_client_safe(oautherr.OauthExpiredToken)}")
 // ```
 pub fn is_client_safe(f: OauthFault) -> Bool []
-    todo("oauth2-nv.oautherr.is_client_safe")
+    match f
+        OauthAuthorizationPending   => true
+        OauthSlowDown(_)            => true
+        OauthExpiredToken           => true
+        OauthNoEntropy              => true
+        OauthMissingField(_)        => true
+        OauthDiscoveryIncomplete(_) => true
+        _                           => false
 
 // The HTTP status a resource server should answer with when a fault
 // reaches it while it was acting as a client.
@@ -299,7 +432,31 @@ pub fn is_client_safe(f: OauthFault) -> Bool []
 //     println("${oautherr.status_for(oautherr.OauthAccessDenied(""))}")
 // ```
 pub fn status_for(f: OauthFault) -> Int []
-    todo("oauth2-nv.oautherr.status_for")
+    match f
+        OauthInvalidRequest(_, _)          => 400
+        OauthInvalidGrant(_, _)            => 400
+        OauthInvalidScope(_, _)            => 400
+        OauthStateMismatch(_, _)           => 400
+        OauthNonceMismatch(_, _)           => 400
+        OauthIssuerMismatch(_, _)          => 400
+        OauthIdTokenRejected(_)            => 401
+        OauthAccessDenied(_)               => 403
+        OauthExpiredToken                  => 410
+        OauthSlowDown(_)                   => 429
+        OauthAuthorizationPending          => 202
+        OauthTemporarilyUnavailable(_, _)  => 503
+        OauthServerError(_, _)             => 502
+        OauthTransport(_)                  => 502
+        OauthMalformedResponse(_)          => 502
+        OauthMissingField(_)               => 502
+        OauthUnknownErrorCode(_, _)        => 502
+        OauthDiscoveryIncomplete(_)        => 502
+        OauthInvalidClient(_, _)           => 500
+        OauthUnauthorizedClient(_, _)      => 500
+        OauthUnsupportedGrantType(_, _)    => 500
+        OauthUnsupportedResponseType(_, _) => 500
+        OauthInsecureEndpoint(_)           => 500
+        OauthNoEntropy                     => 500
 
 // Every code this library reads, as strings a person can read.
 //
@@ -315,4 +472,7 @@ pub fn status_for(f: OauthFault) -> Int []
 //     println("${list.len(oautherr.known_codes())}")
 // ```
 pub fn known_codes() -> [Str] []
-    todo("oauth2-nv.oautherr.known_codes")
+    ["invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+     "unsupported_grant_type", "invalid_scope", "unsupported_response_type",
+     "server_error", "temporarily_unavailable", "authorization_pending", "slow_down",
+     "access_denied", "expired_token"]

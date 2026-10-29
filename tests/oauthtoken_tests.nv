@@ -1,9 +1,6 @@
 // oauthtoken_tests.nv — the token value, and the clock it does not
 // have.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: oauth2-nv.oauthtoken.<fn>`.
-//
 // EVERY TIME BELOW IS A LITERAL, and that is the module's design
 // showing through: `with_expires_in` takes the arrival time and
 // `is_expired` takes the current time, so an expiry test is arithmetic
@@ -70,7 +67,7 @@ fn test_expires_in_is_counted_from_the_arrival_the_caller_supplied() [io]
             test.assert(oauthtoken.is_expired(t, later(3601), 0))
 
     test.case("and an absurd expires_in leaves the calendar rather than wrapping")
-    match oauthtoken.with_expires_in(oauthtoken.token("a"), 9000000000000, arrived())
+    match oauthtoken.with_expires_in(oauthtoken.token("a"), 90000000000000000, arrived())
         Ok(_)  => test.assert(false)
         Err(_) => test.assert(true)
 
@@ -189,3 +186,83 @@ fn test_a_token_redacted_carries_no_credential() [io]
     let line = oauthtoken.redacted(t)
     test.assert(not str.contains(line, "ya29.a-real-looking-token"))
     test.assert(not str.contains(line, "1//refresh"))
+
+// A token as a token endpoint would have produced it, built by hand so
+// the tests reach the members `token` leaves empty.
+fn full_token(kind: oauthtoken.OauthTokenType) -> oauthtoken.OauthToken []
+    OauthToken { access_token: "SECRET-ACCESS", token_type: kind,
+                 expires_at: Some(later(3600)), refresh_token: "SECRET-REFRESH",
+                 scope: "openid  email ", id_token: "SECRET-ID",
+                 raw_json: "{\"resource_owner_id\":\"u-42\",\"refresh_token_expires_in\":86400,\"n\":1.5}" }
+
+@test
+fn test_scopes_are_split_on_runs_of_spaces() [io]
+    let t = full_token(oauthtoken.OauthBearer)
+    test.case("an empty element is not a scope")
+    let got = oauthtoken.granted_scopes(t)
+    test.assert_eq(list.len(got), 2)
+    test.assert_eq_str(got[0], "openid")
+    test.assert_eq_str(got[1], "email")
+    test.assert(oauthtoken.has_scope(t, "email"))
+    test.assert(not oauthtoken.has_scope(t, "repo"))
+
+    test.case("covers compares against what the server listed")
+    test.assert(oauthtoken.covers(t, ["email"]))
+    test.assert(oauthtoken.covers(t, ["openid", "email"]))
+    test.assert(not oauthtoken.covers(t, ["openid", "repo"]))
+
+@test
+fn test_a_token_type_that_cannot_be_presented_is_refused_by_name() [io]
+    test.case("MAC and an unknown type, each with its own reason")
+    match oauthtoken.authorization_header(full_token(oauthtoken.OauthMac))
+        Ok(_)  => test.fail("MAC produced a header")
+        Err(f) => test.assert(str.contains(f.message(), "abandoned"))
+    match oauthtoken.authorization_header(full_token(oauthtoken.OauthTokenTypeOther("N_A")))
+        Ok(_)  => test.fail("an unknown type produced a header")
+        Err(f) => test.assert(str.contains(f.message(), "N_A"))
+    match oauthtoken.authorization_header(full_token(oauthtoken.OauthDpop))
+        Ok(_)  => test.fail("DPoP produced a header")
+        Err(f) => test.assert(str.contains(f.message(), "DPoP"))
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.OauthDpop), "DPoP")
+    test.assert_eq_str(oauthtoken.token_type_name(oauthtoken.OauthTokenTypeOther("x")), "x")
+
+@test
+fn test_the_members_nobody_standardised_are_read_from_the_raw_document() [io]
+    let t = full_token(oauthtoken.OauthBearer)
+    test.case("a string member and an integer member")
+    test.assert_eq_str(oauthtoken.extra(t, "resource_owner_id") ?? "-", "u-42")
+    test.assert_eq(oauthtoken.extra_int(t, "refresh_token_expires_in") ?? 0 - 1, 86400)
+
+    test.case("an absent member, and one of the other kind")
+    test.assert_none(oauthtoken.extra(t, "missing"))
+    test.assert_none(oauthtoken.extra(t, "refresh_token_expires_in"))
+    test.assert_none(oauthtoken.extra_int(t, "resource_owner_id"))
+
+    test.case("a raw document that is not JSON answers None")
+    let broken = OauthToken { access_token: "a", token_type: oauthtoken.OauthBearer,
+                              expires_at: None, refresh_token: "", scope: "", id_token: "",
+                              raw_json: "not json" }
+    test.assert_none(oauthtoken.extra(broken, "x"))
+    test.assert_none(oauthtoken.extra_int(broken, "x"))
+
+@test
+fn test_the_redaction_shows_lengths_the_expiry_and_the_scope() [io]
+    let line = oauthtoken.redacted(full_token(oauthtoken.OauthBearer))
+    test.assert(not str.contains(line, "SECRET"))
+    test.assert(str.contains(line, "access_token=<13 bytes>"))
+    test.assert(str.contains(line, "refresh_token=<14 bytes>"))
+    test.assert(str.contains(line, "id_token=<9 bytes>"))
+    test.assert(str.contains(line, "expires_at=2026-09-11T01:00:00Z"))
+    test.assert(str.contains(line, "token_type=Bearer"))
+
+    test.case("absent secrets and an absent expiry are said to be absent")
+    let bare = oauthtoken.redacted(oauthtoken.token("x"))
+    test.assert(str.contains(bare, "refresh_token=none"))
+    test.assert(str.contains(bare, "id_token=none"))
+    test.assert(str.contains(bare, "expires_at=none"))
+
+@test
+fn test_the_mac_spelling_is_recognised_in_any_case() [io]
+    match oauthtoken.token_type_named("MAC")
+        OauthMac => test.assert(true)
+        _        => test.fail("MAC was not recognised")

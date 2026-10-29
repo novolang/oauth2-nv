@@ -1,8 +1,5 @@
 // oautherr_tests.nv — the four questions a caller has about a fault.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: oauth2-nv.oautherr.<fn>`.
-//
 // The codes are RFC 6749 § 5.2's six, § 4.1.2.1's three and RFC 8628
 // § 3.5's four.  The predicates are the point: a client that branches
 // on the code STRING gets `authorization_pending` wrong, because it is
@@ -158,3 +155,89 @@ fn test_a_fault_reports_itself_through_the_error_trait() [io]
     test.case("the message says what happened")
     let f = oautherr.fault_named("invalid_grant", "code already used", "")
     test.assert(str.len(f.message()) > 0)
+
+// ── Every variant, once ──────────────────────────────────────────────
+//
+// One row per variant: the wire code, whether it retries, whether it is
+// a configuration fault, whether its text may be shown, the status a
+// gateway answers with, and the first words of its report.
+
+fn every_fault() -> [oautherr.OauthFault] []
+    [oautherr.OauthInvalidRequest("d", "u"), oautherr.OauthInvalidClient("d", "u"),
+     oautherr.OauthInvalidGrant("d", "u"), oautherr.OauthUnauthorizedClient("d", "u"),
+     oautherr.OauthUnsupportedGrantType("d", "u"), oautherr.OauthInvalidScope("d", "u"),
+     oautherr.OauthUnsupportedResponseType("d", "u"), oautherr.OauthServerError("d", "u"),
+     oautherr.OauthTemporarilyUnavailable("d", "u"), oautherr.OauthAuthorizationPending,
+     oautherr.OauthSlowDown(9), oautherr.OauthAccessDenied("d"), oautherr.OauthExpiredToken,
+     oautherr.OauthStateMismatch("a", "b"), oautherr.OauthNonceMismatch("a", "b"),
+     oautherr.OauthIssuerMismatch("a", "b"), oautherr.OauthNoEntropy,
+     oautherr.OauthTransport("t"), oautherr.OauthMalformedResponse("m"),
+     oautherr.OauthMissingField("f"), oautherr.OauthUnknownErrorCode("x_code", "d"),
+     oautherr.OauthIdTokenRejected("r"), oautherr.OauthDiscoveryIncomplete("f"),
+     oautherr.OauthInsecureEndpoint("http://e")]
+
+@test
+fn test_each_variant_has_its_code_description_and_uri() [io]
+    let all = every_fault()
+    let codes = ["invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+                 "unsupported_grant_type", "invalid_scope", "unsupported_response_type",
+                 "server_error", "temporarily_unavailable", "authorization_pending",
+                 "slow_down", "access_denied", "expired_token", "", "", "", "", "", "", "",
+                 "x_code", "", "", ""]
+    // Which variants carry the server's description and uri.
+    let descs = ["d", "d", "d", "d", "d", "d", "d", "d", "d", "", "", "d", "", "", "", "", "",
+                 "", "", "", "d", "", "", ""]
+    let uris = ["u", "u", "u", "u", "u", "u", "u", "u", "u", "", "", "", "", "", "", "", "",
+                "", "", "", "", "", "", ""]
+    test.assert_eq(list.len(all), 24)
+    for i in 0..24
+        test.case("variant ${i}")
+        test.assert_eq_str(oautherr.fault_code(all[i]), codes[i])
+        test.assert_eq_str(oautherr.fault_description(all[i]), descs[i])
+        test.assert_eq_str(oautherr.fault_uri(all[i]), uris[i])
+
+@test
+fn test_each_variant_answers_the_four_questions_and_a_status() [io]
+    let all = every_fault()
+    let retry = [0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    let config = [1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1]
+    let user = [0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let safe = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]
+    let status = [400, 500, 400, 500, 500, 400, 500, 502, 503, 202, 429, 403, 410, 400, 400,
+                   400, 500, 502, 502, 502, 502, 401, 502, 500]
+    for i in 0..24
+        test.case("variant ${i}")
+        test.assert_eq(oautherr.is_retryable(all[i]), retry[i] == 1)
+        test.assert_eq(oautherr.is_configuration_fault(all[i]), config[i] == 1)
+        test.assert_eq(oautherr.needs_user_action(all[i]), user[i] == 1)
+        test.assert_eq(oautherr.is_client_safe(all[i]), safe[i] == 1)
+        test.assert_eq(oautherr.status_for(all[i]), status[i])
+        test.assert(str.len(all[i].message()) > 0)
+
+@test
+fn test_the_reports_name_what_happened() [io]
+    test.case("a server code with and without its description")
+    test.assert_eq_str(oautherr.OauthInvalidGrant("used", "").message(),
+                       "the server answered invalid_grant: used")
+    test.assert_eq_str(oautherr.OauthInvalidGrant("", "").message(),
+                       "the server answered invalid_grant")
+    test.case("the three mismatches say this client refused")
+    test.assert(str.contains(oautherr.OauthStateMismatch("a", "b").message(), "this client refused"))
+    test.assert(str.contains(oautherr.OauthNonceMismatch("a", "b").message(), "this client refused"))
+    test.assert(str.contains(oautherr.OauthIssuerMismatch("a", "b").message(), "this client refused"))
+
+@test
+fn test_slow_down_never_goes_below_the_grants_interval_plus_five() [io]
+    test.case("a floor above the sum wins")
+    test.assert_eq(oautherr.poll_delay(oautherr.OauthSlowDown(30), 5), 30)
+    test.case("the wire carries no floor, so fault_named gives zero")
+    test.assert_eq(oautherr.poll_delay(oautherr.fault_named("slow_down", "", ""), 5), 10)
+
+@test
+fn test_every_known_code_is_read_as_known() [io]
+    let codes = oautherr.known_codes()
+    test.assert_eq(list.len(codes), 13)
+    for c in codes
+        match oautherr.fault_named(c, "", "")
+            OauthUnknownErrorCode(_, _) => test.fail("known code read as unknown: ${c}")
+            f                           => test.assert_eq_str(oautherr.fault_code(f), c)

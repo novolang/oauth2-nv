@@ -1,8 +1,6 @@
 // oauthtoken.nv — what a token endpoint answers with, as a value with
 // no clock in it.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THIS MODULE HAS NO CLOCK, and that is the decision the whole package
 // rests on.  RFC 6749 § 5.1 sends `expires_in` — a count of SECONDS,
 // relative to a moment nobody wrote down.  Turning that into an
@@ -30,8 +28,13 @@
 // response arrived as, so a caller is never stuck because this library
 // did not anticipate a field.
 
+use std.json
+use std.list
+use std.str
+use arith
 use civil
 use oautherr
+use span
 
 // How the access token is presented to a resource server.
 pub enum OauthTokenType
@@ -99,7 +102,8 @@ pub struct OauthToken
 //     println(t.access_token)
 // ```
 pub fn token(access_token: Str) -> OauthToken []
-    todo("oauth2-nv.oauthtoken.token")
+    OauthToken { access_token: access_token, token_type: OauthBearer, expires_at: None,
+                 refresh_token: "", scope: "", id_token: "", raw_json: "" }
 
 // A token type from the server's spelling, compared
 // case-insensitively as RFC 6749 § 7.1 requires.
@@ -114,7 +118,15 @@ pub fn token(access_token: Str) -> OauthToken []
 //     println(oauthtoken.token_type_name(oauthtoken.token_type_named("bearer")))
 // ```
 pub fn token_type_named(name: Str) -> OauthTokenType []
-    todo("oauth2-nv.oauthtoken.token_type_named")
+    let lowered = str.lower(name)
+    if lowered == "bearer"
+        OauthBearer
+    else if lowered == "dpop"
+        OauthDpop
+    else if lowered == "mac"
+        OauthMac
+    else
+        OauthTokenTypeOther(name)
 
 // The canonical spelling of a token type: `Bearer`, `DPoP`, `mac`, or
 // whatever `OauthTokenTypeOther` carries.
@@ -126,7 +138,11 @@ pub fn token_type_named(name: Str) -> OauthTokenType []
 //     println(oauthtoken.token_type_name(oauthtoken.OauthBearer))
 // ```
 pub fn token_type_name(t: OauthTokenType) -> Str []
-    todo("oauth2-nv.oauthtoken.token_type_name")
+    match t
+        OauthBearer            => "Bearer"
+        OauthDpop              => "DPoP"
+        OauthMac               => "mac"
+        OauthTokenTypeOther(n) => n
 
 // `expires_in` seconds, counted from the moment the caller says the
 // response arrived.
@@ -149,7 +165,9 @@ pub fn token_type_name(t: OauthTokenType) -> Str []
 // ```
 pub fn with_expires_in(t: OauthToken, seconds: Int,
                        arrived_at: civil.CivilDateTime) -> Result<OauthToken, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthtoken.with_expires_in")
+    match arith.add_delta(arrived_at, span.seconds(seconds))
+        Err(_) => Err(oautherr.OauthMalformedResponse("expires_in of ${seconds} seconds leaves the calendar's range"))
+        Ok(at) => Ok(with_expires_at(t, at))
 
 // An explicit expiry, for a caller who computed it elsewhere.
 //
@@ -166,7 +184,9 @@ pub fn with_expires_in(t: OauthToken, seconds: Int,
 //             println("${oauthtoken.has_expiry(t)}")
 // ```
 pub fn with_expires_at(t: OauthToken, at: civil.CivilDateTime) -> OauthToken []
-    todo("oauth2-nv.oauthtoken.with_expires_at")
+    OauthToken { access_token: t.access_token, token_type: t.token_type, expires_at: Some(at),
+                 refresh_token: t.refresh_token, scope: t.scope, id_token: t.id_token,
+                 raw_json: t.raw_json }
 
 // The refresh token this token was issued with.
 //
@@ -178,7 +198,9 @@ pub fn with_expires_at(t: OauthToken, at: civil.CivilDateTime) -> OauthToken []
 //     println(t.refresh_token)
 // ```
 pub fn with_refresh(t: OauthToken, refresh_token: Str) -> OauthToken []
-    todo("oauth2-nv.oauthtoken.with_refresh")
+    OauthToken { access_token: t.access_token, token_type: t.token_type,
+                 expires_at: t.expires_at, refresh_token: refresh_token, scope: t.scope,
+                 id_token: t.id_token, raw_json: t.raw_json }
 
 // Whether the server said when this token dies.
 //
@@ -193,7 +215,9 @@ pub fn with_refresh(t: OauthToken, refresh_token: Str) -> OauthToken []
 //     println("${oauthtoken.has_expiry(oauthtoken.token("x"))}")
 // ```
 pub fn has_expiry(t: OauthToken) -> Bool []
-    todo("oauth2-nv.oauthtoken.has_expiry")
+    match t.expires_at
+        Some(_) => true
+        None    => false
 
 // Whether the token is dead at `now`, treating anything within
 // `leeway_secs` of the expiry as dead.
@@ -218,7 +242,9 @@ pub fn has_expiry(t: OauthToken) -> Bool []
 //             println("${oauthtoken.is_expired(oauthtoken.token("x"), now, 30)}")
 // ```
 pub fn is_expired(t: OauthToken, now: civil.CivilDateTime, leeway_secs: Int) -> Bool []
-    todo("oauth2-nv.oauthtoken.is_expired")
+    match seconds_left(t, now)
+        Some(n) => n <= leeway_secs
+        None    => false
 
 // Whether a caller holding this token should refresh before using it.
 //
@@ -238,7 +264,10 @@ pub fn is_expired(t: OauthToken, now: civil.CivilDateTime, leeway_secs: Int) -> 
 //             println("${oauthtoken.needs_refresh(oauthtoken.token("x"), now, 30)}")
 // ```
 pub fn needs_refresh(t: OauthToken, now: civil.CivilDateTime, leeway_secs: Int) -> Bool []
-    todo("oauth2-nv.oauthtoken.needs_refresh")
+    if t.refresh_token == ""
+        false
+    else
+        is_expired(t, now, leeway_secs)
 
 // Seconds until the expiry, negative once past it, `None` where the
 // server sent no expiry.
@@ -257,7 +286,9 @@ pub fn needs_refresh(t: OauthToken, now: civil.CivilDateTime, leeway_secs: Int) 
 //                 None    => println("the server did not say")
 // ```
 pub fn seconds_left(t: OauthToken, now: civil.CivilDateTime) -> ?Int []
-    todo("oauth2-nv.oauthtoken.seconds_left")
+    match t.expires_at
+        Some(at) => Some(unix_seconds(at) - unix_seconds(now))
+        None     => None
 
 // The `Authorization` header value this token is presented with.
 //
@@ -277,7 +308,11 @@ pub fn seconds_left(t: OauthToken, now: civil.CivilDateTime) -> ?Int []
 //         Err(_) => println("this token type needs more than a header")
 // ```
 pub fn authorization_header(t: OauthToken) -> Result<Str, oautherr.OauthFault> []
-    todo("oauth2-nv.oauthtoken.authorization_header")
+    match t.token_type
+        OauthBearer            => Ok("Bearer ${t.access_token}")
+        OauthDpop              => Err(oautherr.OauthMalformedResponse("a DPoP token needs a proof JWT signed per request, and this package holds no key to sign one"))
+        OauthMac               => Err(oautherr.OauthMalformedResponse("the MAC token type belongs to an abandoned draft and is never built"))
+        OauthTokenTypeOther(n) => Err(oautherr.OauthMalformedResponse("the token type '${n}' is not one this package knows how to present"))
 
 // The granted scopes, split on spaces.
 //
@@ -294,7 +329,7 @@ pub fn authorization_header(t: OauthToken) -> Result<Str, oautherr.OauthFault> [
 //     println("${list.len(oauthtoken.granted_scopes(oauthtoken.token("x")))}")
 // ```
 pub fn granted_scopes(t: OauthToken) -> [Str] []
-    todo("oauth2-nv.oauthtoken.granted_scopes")
+    split_scopes(t.scope)
 
 // Whether a named scope was granted.
 //
@@ -305,7 +340,7 @@ pub fn granted_scopes(t: OauthToken) -> [Str] []
 //     println("${oauthtoken.has_scope(oauthtoken.token("x"), "repo")}")
 // ```
 pub fn has_scope(t: OauthToken, scope: Str) -> Bool []
-    todo("oauth2-nv.oauthtoken.has_scope")
+    list.contains(split_scopes(t.scope), scope)
 
 // Whether every scope the caller asked for was granted, given what it
 // asked for.
@@ -322,7 +357,15 @@ pub fn has_scope(t: OauthToken, scope: Str) -> Bool []
 //     println("${oauthtoken.covers(oauthtoken.token("x"), ["repo"])}")
 // ```
 pub fn covers(t: OauthToken, requested: [Str]) -> Bool []
-    todo("oauth2-nv.oauthtoken.covers")
+    if t.scope == ""
+        true
+    else
+        let have = split_scopes(t.scope)
+        var ok = true
+        for r in requested
+            if not list.contains(have, r)
+                ok = false
+        ok
 
 // A member of the response document this library does not model.
 //
@@ -341,7 +384,9 @@ pub fn covers(t: OauthToken, requested: [Str]) -> Bool []
 //         None    => println("absent")
 // ```
 pub fn extra(t: OauthToken, member: Str) -> ?Str []
-    todo("oauth2-nv.oauthtoken.extra")
+    match json.parse(t.raw_json)
+        None    => None
+        Some(v) => json.get_str(v, member)
 
 // A numeric member of the response document, for the `*_expires_in`
 // fields providers invent.
@@ -355,7 +400,9 @@ pub fn extra(t: OauthToken, member: Str) -> ?Str []
 //         None    => println("absent")
 // ```
 pub fn extra_int(t: OauthToken, member: Str) -> ?Int []
-    todo("oauth2-nv.oauthtoken.extra_int")
+    match json.parse(t.raw_json)
+        None    => None
+        Some(v) => json.get_int(v, member)
 
 // A token with its secrets replaced by their lengths, for a log.
 //
@@ -371,4 +418,37 @@ pub fn extra_int(t: OauthToken, member: Str) -> ?Int []
 //     println(oauthtoken.redacted(oauthtoken.token("ya29.example")))
 // ```
 pub fn redacted(t: OauthToken) -> Str []
-    todo("oauth2-nv.oauthtoken.redacted")
+    let expiry = match t.expires_at
+        Some(at) => iso(at)
+        None     => "none"
+    "OauthToken(access_token=${secret_len(t.access_token)}, token_type=${token_type_name(t.token_type)}, expires_at=${expiry}, refresh_token=${secret_len(t.refresh_token)}, scope=${t.scope}, id_token=${secret_len(t.id_token)})"
+
+// Seconds since 1970-01-01T00:00:00 of a civil date-time, whole seconds.
+// Pure integer arithmetic on the epoch day, so two readings compare
+// without a calendar error to handle.
+fn unix_seconds(dt: civil.CivilDateTime) -> Int []
+    civil.epoch_day(dt.date) * 86400 + dt.time.hour * 3600 + dt.time.minute * 60 + dt.time.second
+
+// A scope string split on runs of spaces, empties dropped.
+fn split_scopes(scope: Str) -> [Str] []
+    var out: [Str] = []
+    for part in str.split(scope, " ")
+        if part != ""
+            out = list.push(out, part)
+    out
+
+// A secret as its length, for a log.
+fn secret_len(s: Str) -> Str []
+    if s == ""
+        "none"
+    else
+        "<${str.len(s)} bytes>"
+
+// A date-time as `YYYY-MM-DDThh:mm:ssZ`.
+fn iso(dt: civil.CivilDateTime) -> Str []
+    let d = dt.date
+    let t = dt.time
+    "${d.year}-${two(d.month)}-${two(d.day)}T${two(t.hour)}:${two(t.minute)}:${two(t.second)}Z"
+
+fn two(n: Int) -> Str []
+    str.pad_left(str.from_int(n), 2, "0")
