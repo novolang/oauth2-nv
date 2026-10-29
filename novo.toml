@@ -89,13 +89,13 @@ form-nv     = "^0.1.1"
 # `nonce`, `azp` and `at_hash`.  Writing a fourth JWT verifier here is
 # how a client ends up accepting `alg: none`.
 # A path while jwt-nv 0.1.0 is not on the registry; it becomes `^0.1.0` at publish.
-jwt-nv      = { path = "../jwt-nv" }
+jwt-nv      = "^0.1.0"
 
 # p256-nv builds the ES256 verifying keys that `oauthdisc.read_jwks`
 # reads out of a JWKS (RFC 7518 § 6.2.1: `x` and `y` are the point's
 # coordinates).  A path while p256-nv 0.1.0 is not on the registry; it
 # becomes `^0.1.0` at publish.
-p256-nv     = { path = "../p256-nv" }
+p256-nv     = "^0.1.0"
 
 # rand-nv is the operating system's generator.  `state`, `nonce` and
 # the PKCE verifier are the three values in this package whose whole

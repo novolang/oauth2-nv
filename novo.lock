@@ -29,8 +29,11 @@ version = "0.1.1"
 hash = "e3178451bf6f042c1dfd54fd488094beea318b78e475ba7d8e0ee88779a1f26c"
 
 [jwt-nv]
-source = "path"
-path = "../jwt-nv"
+source = "registry"
+url = "https://registry.novo-lang.org"
+req = "^0.1.0"
+version = "0.1.0"
+hash = "3e011aacd0ee845888cc2f391d6dfa46c318a269aea1293694d7de96882cc8a6"
 
 [mime-nv]
 source = "registry"
@@ -40,8 +43,11 @@ version = "0.1.1"
 hash = "6fe66998a90e9216bc2a7636247b8291401e8381bab8130d44847e2f60ac6d61"
 
 [p256-nv]
-source = "path"
-path = "../p256-nv"
+source = "registry"
+url = "https://registry.novo-lang.org"
+req = "^0.1.0"
+version = "0.1.0"
+hash = "6f5ee996b633131e7b41c4454dcddcf24692e39dd383d835b9dff1a8a41dd17b"
 
 [rand-nv]
 source = "registry"
